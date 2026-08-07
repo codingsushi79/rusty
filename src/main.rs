@@ -83,6 +83,9 @@ fn run<B: ratatui::backend::Backend>(
         if app.shell_poll() {
             dirty = true;
         }
+        if app.tick() {
+            dirty = true;
+        }
         if dirty {
             terminal.draw(|f| ui::render(f, app))?;
         }

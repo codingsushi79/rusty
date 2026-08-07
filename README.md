@@ -80,8 +80,9 @@ rusty ./my-proj  # open a folder
   is on your `PATH`.
 - **Git** — a **diff gutter** (added / modified / removed markers vs HEAD),
   plus **init repo**, **add remote**, **stage file / stage all**, **commit**,
-  **push / pull / fetch** from the palette (network commands run in the terminal
-  pane, so they use your existing git credentials).
+  **push / pull / fetch** from the palette. Network commands run **in the
+  background** (no pane) using your existing git credentials, and report the
+  result in the status bar.
 - **Settings** (`Ctrl+,`) — tab size, line numbers, syntax theme; saved to
   `~/.config/rusty/config.toml` (or the platform equivalent).
 - **Self-update** — `Rusty: Update` in the palette reinstalls the latest build.

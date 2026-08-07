@@ -2,7 +2,9 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::Receiver;
+use std::process::Command;
+use std::sync::mpsc::{channel, Receiver, TryRecvError};
+use std::time::Instant;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
@@ -132,6 +134,11 @@ pub struct App {
     pub settings: Settings,
     pub settings_sel: usize,
 
+    // Background jobs (hidden terminal) → each yields a final (ok, message).
+    jobs: Vec<Receiver<(bool, String)>>,
+    last_status: String,
+    status_time: Instant,
+
     clipboard: String,
     sys_clip: Option<arboard::Clipboard>,
 
@@ -183,6 +190,9 @@ impl App {
             shell_open: false,
             settings,
             settings_sel: 0,
+            jobs: Vec::new(),
+            last_status: String::new(),
+            status_time: Instant::now(),
             clipboard: String::new(),
             sys_clip: arboard::Clipboard::new().ok(),
             lsp: None,
@@ -656,18 +666,68 @@ impl App {
         }
     }
 
-    /// Open/focus the terminal pane and run a command in it.
-    fn run_in_shell(&mut self, cmd: &str) {
-        if self.shell.is_none() {
-            let (s, rx) = Shell::new(self.tree.root.clone());
-            self.shell = Some(s);
-            self.shell_rx = Some(rx);
+    /// Run a command in a hidden background terminal; the result lands in the
+    /// status bar. `label` is shown while it runs (e.g. "Pushing to origin").
+    fn run_hidden(&mut self, label: &str, cmd: &str) {
+        self.set_status(format!("{label}…"));
+        let (tx, rx) = channel();
+        let cwd = self.tree.root.clone();
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+        let script = format!("{cmd} 2>&1");
+        let label = label.to_string();
+        std::thread::spawn(move || {
+            let msg = match Command::new(shell).arg("-c").arg(&script).current_dir(&cwd).output() {
+                Ok(o) => {
+                    let text = String::from_utf8_lossy(&o.stdout);
+                    let last = text.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("").trim().to_string();
+                    if o.status.success() {
+                        (true, if last.is_empty() { format!("{label} ✓") } else { format!("{label}: {last}") })
+                    } else {
+                        (false, format!("{label} failed: {}", if last.is_empty() { "see git output".into() } else { last }))
+                    }
+                }
+                Err(e) => (false, format!("{label} failed: {e}")),
+            };
+            let _ = tx.send(msg);
+        });
+        self.jobs.push(rx);
+    }
+
+    fn set_status(&mut self, s: String) {
+        self.status = s;
+    }
+
+    /// Per-tick housekeeping: collect finished jobs and expire stale status.
+    /// Returns true if a redraw is warranted.
+    pub fn tick(&mut self) -> bool {
+        let mut dirty = false;
+        let mut i = 0;
+        while i < self.jobs.len() {
+            match self.jobs[i].try_recv() {
+                Ok((_ok, msg)) => {
+                    self.status = msg;
+                    self.jobs.remove(i);
+                    dirty = true;
+                }
+                Err(TryRecvError::Empty) => i += 1,
+                Err(TryRecvError::Disconnected) => {
+                    self.jobs.remove(i);
+                }
+            }
         }
-        self.shell_open = true;
-        self.focus = Focus::Shell;
-        if let Some(s) = &mut self.shell {
-            s.run(cmd);
+        // Reset the timer whenever the status text changes.
+        if self.status != self.last_status {
+            self.last_status = self.status.clone();
+            self.status_time = Instant::now();
+            dirty = true;
         }
+        // Fade the status after a few idle seconds (but keep it while a job runs).
+        if !self.status.is_empty() && self.jobs.is_empty() && self.status_time.elapsed().as_secs() >= 4 {
+            self.status.clear();
+            self.last_status.clear();
+            dirty = true;
+        }
+        dirty
     }
 
     fn toggle_shell(&mut self) {
@@ -1190,22 +1250,12 @@ impl App {
                 self.focus = Focus::Settings;
                 self.settings_sel = 0;
             }
-            Action::Push => {
-                // Uses the user's configured git credentials via the shell.
-                self.run_in_shell("git push -u origin HEAD");
-                self.status = "Pushing to origin…".to_string();
-            }
-            Action::Pull => {
-                self.run_in_shell("git pull");
-                self.status = "Pulling from origin…".to_string();
-            }
-            Action::Fetch => {
-                self.run_in_shell("git fetch --all");
-                self.status = "Fetching…".to_string();
-            }
+            // These run hidden in the background; results appear in the status bar.
+            Action::Push => self.run_hidden("Pushing to origin", "git push -u origin HEAD"),
+            Action::Pull => self.run_hidden("Pulling", "git pull"),
+            Action::Fetch => self.run_hidden("Fetching", "git fetch --all"),
             Action::Update => {
-                self.run_in_shell(&format!("cargo install --git {REPO_URL} --force"));
-                self.status = "Updating Rusty… restart when it finishes".to_string();
+                self.run_hidden("Updating Rusty", &format!("cargo install --git {REPO_URL} --force"))
             }
             Action::Quit => self.quit = true,
         }
