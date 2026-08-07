@@ -24,6 +24,18 @@ const BORDER: Color = Color::Rgb(60, 60, 62);
 const GIT_ADD: Color = Color::Rgb(46, 160, 67);
 const GIT_MOD: Color = Color::Rgb(0, 122, 204);
 const GIT_DEL: Color = Color::Rgb(241, 76, 76);
+// Tree decoration colors (VS Code-ish).
+const DEC_MOD: Color = Color::Rgb(0xe2, 0xc0, 0x8d);
+const DEC_ADD: Color = Color::Rgb(0x73, 0xc9, 0x91);
+const DEC_DEL: Color = Color::Rgb(0xc7, 0x4e, 0x39);
+
+fn deco_color(ch: char) -> Color {
+    match ch {
+        'M' => DEC_MOD,
+        'U' | 'A' => DEC_ADD,
+        _ => DEC_DEL, // D, C
+    }
+}
 const ERR: Color = Color::Rgb(241, 76, 76);
 const WARN: Color = Color::Rgb(204, 167, 0);
 
@@ -56,11 +68,11 @@ pub fn render(f: &mut Frame, app: &mut App) {
         content
     };
 
-    if app.shell_open {
-        let h = (editor_area.height / 3).clamp(6, 14);
+    if app.term_open {
+        let h = (editor_area.height / 3).clamp(6, 16);
         let split = Layout::vertical([Constraint::Min(3), Constraint::Length(h)]).split(editor_area);
         render_editor(f, app, split[0]);
-        render_shell(f, app, split[1]);
+        render_terminal(f, app, split[1]);
     } else {
         render_editor(f, app, editor_area);
     }
@@ -163,6 +175,7 @@ fn render_tree(f: &mut Frame, app: &mut App, area: Rect) {
     );
 
     let expanded = &app.tree.expanded;
+    let git_map = &app.git_status_map;
     let items: Vec<ListItem> = app
         .tree
         .visible()
@@ -174,8 +187,20 @@ fn render_tree(f: &mut Frame, app: &mut App, area: Rect) {
             } else {
                 "  "
             };
-            let style = if e.is_dir { Style::default().fg(TEXT) } else { Style::default().fg(MUTED) };
-            ListItem::new(Line::from(Span::styled(format!("{indent}{icon}{}", e.name), style)))
+            let deco = if e.is_dir { None } else { git_map.get(&e.path).copied() };
+            let name_color = match deco {
+                Some(ch) => deco_color(ch),
+                None if e.is_dir => TEXT,
+                None => MUTED,
+            };
+            let mut spans = vec![Span::styled(format!("{indent}{icon}{}", e.name), Style::default().fg(name_color))];
+            if let Some(ch) = deco {
+                spans.push(Span::styled(
+                    format!("  {ch}"),
+                    Style::default().fg(name_color).add_modifier(Modifier::BOLD),
+                ));
+            }
+            ListItem::new(Line::from(spans))
         })
         .collect();
 
@@ -390,7 +415,7 @@ fn render_hints(f: &mut Frame, app: &App, area: Rect) {
             Style::default().fg(MUTED),
         )),
         Focus::Shell => Line::from(Span::styled(
-            "  Enter run   'clear' to clear   Esc editor   ^J hide",
+            "  interactive shell — keys go to the terminal · ^J to return to the editor",
             Style::default().fg(MUTED),
         )),
         Focus::Find => Line::from(vec![
@@ -470,7 +495,7 @@ fn render_palette(f: &mut Frame, app: &App, size: Rect) {
     f.render_stateful_widget(list, rows[2], &mut st);
 }
 
-fn render_shell(f: &mut Frame, app: &App, area: Rect) {
+fn render_terminal(f: &mut Frame, app: &mut App, area: Rect) {
     let focused = app.focus == Focus::Shell;
     let block = Block::default()
         .borders(Borders::TOP)
@@ -483,28 +508,74 @@ fn render_shell(f: &mut Frame, app: &App, area: Rect) {
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    let rows = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(inner);
+    let Some(term) = &mut app.term else { return };
+    term.resize(inner.height, inner.width);
+    let screen = term.screen();
+    let (rows, cols) = screen.size();
 
-    // Output: show the tail that fits.
-    let h = rows[0].height as usize;
-    let all: Vec<&str> = app.shell_output.lines().collect();
-    let start = all.len().saturating_sub(h);
-    let out: Vec<Line> = all[start..]
-        .iter()
-        .map(|l| Line::from(Span::styled((*l).to_string(), Style::default().fg(TEXT))))
-        .collect();
-    f.render_widget(Paragraph::new(out), rows[0]);
+    let mut lines: Vec<Line> = Vec::with_capacity(rows as usize);
+    for r in 0..rows {
+        let mut spans: Vec<Span> = Vec::new();
+        let mut run = String::new();
+        let mut run_style: Option<Style> = None;
+        for c in 0..cols {
+            let (ch, style) = match screen.cell(r, c) {
+                Some(cell) => {
+                    let s = cell.contents();
+                    (if s.is_empty() { " ".to_string() } else { s }, cell_style(cell))
+                }
+                None => (" ".to_string(), Style::default()),
+            };
+            if run_style != Some(style) {
+                if let Some(st) = run_style {
+                    spans.push(Span::styled(std::mem::take(&mut run), st));
+                }
+                run_style = Some(style);
+            }
+            run.push_str(&ch);
+        }
+        if let Some(st) = run_style {
+            spans.push(Span::styled(run, st));
+        }
+        lines.push(Line::from(spans));
+    }
+    f.render_widget(Paragraph::new(lines), inner);
 
-    // Input line.
-    let prompt = app.shell.as_ref().map(|s| s.prompt()).unwrap_or_else(|| "$ ".to_string());
-    let cursor = if focused { "_" } else { "" };
-    f.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(prompt, Style::default().fg(GIT_ADD)),
-            Span::styled(format!("{}{cursor}", app.shell_input), Style::default().fg(WHITE)),
-        ])),
-        rows[1],
-    );
+    if focused && !screen.hide_cursor() {
+        let (cr, cc) = screen.cursor_position();
+        f.set_cursor_position(Position::new(inner.x + cc, inner.y + cr));
+    }
+}
+
+fn vt_color(c: vt100::Color) -> Option<Color> {
+    match c {
+        vt100::Color::Default => None,
+        vt100::Color::Idx(i) => Some(Color::Indexed(i)),
+        vt100::Color::Rgb(r, g, b) => Some(Color::Rgb(r, g, b)),
+    }
+}
+
+fn cell_style(cell: &vt100::Cell) -> Style {
+    let mut s = Style::default();
+    if let Some(fg) = vt_color(cell.fgcolor()) {
+        s = s.fg(fg);
+    }
+    if let Some(bg) = vt_color(cell.bgcolor()) {
+        s = s.bg(bg);
+    }
+    if cell.bold() {
+        s = s.add_modifier(Modifier::BOLD);
+    }
+    if cell.italic() {
+        s = s.add_modifier(Modifier::ITALIC);
+    }
+    if cell.underline() {
+        s = s.add_modifier(Modifier::UNDERLINED);
+    }
+    if cell.inverse() {
+        s = s.add_modifier(Modifier::REVERSED);
+    }
+    s
 }
 
 fn render_search(f: &mut Frame, app: &App, size: Rect) {

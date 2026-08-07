@@ -1,6 +1,50 @@
-//! Git integration: branch, HEAD blob (for the diff gutter), stage, commit.
+//! Git integration: branch, HEAD blob (for the diff gutter), status, stage,
+//! commit, discard.
 
-use std::path::Path;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+
+/// Per-file working-tree status letter (M/A/U/D/C), keyed by absolute path.
+pub fn statuses(root: &Path) -> HashMap<PathBuf, char> {
+    let mut map = HashMap::new();
+    let Ok(repo) = git2::Repository::discover(root) else { return map };
+    let Some(workdir) = repo.workdir().map(Path::to_path_buf) else { return map };
+    let mut opts = git2::StatusOptions::new();
+    opts.include_untracked(true).recurse_untracked_dirs(true);
+    let Ok(statuses) = repo.statuses(Some(&mut opts)) else { return map };
+    for e in statuses.iter() {
+        let Some(rel) = e.path() else { continue };
+        let s = e.status();
+        let letter = if s.is_conflicted() {
+            'C'
+        } else if s.is_wt_deleted() || s.is_index_deleted() {
+            'D'
+        } else if s.is_wt_new() {
+            'U'
+        } else if s.is_index_new() {
+            'A'
+        } else if s.is_wt_modified() || s.is_index_modified() || s.is_wt_renamed() || s.is_index_renamed() {
+            'M'
+        } else {
+            continue;
+        };
+        let abs = workdir.join(rel);
+        map.insert(abs.canonicalize().unwrap_or(abs), letter);
+    }
+    map
+}
+
+/// Discard working-tree changes to `file` (restore it from HEAD).
+pub fn discard(file: &Path) -> anyhow::Result<()> {
+    let repo = git2::Repository::discover(file)?;
+    let workdir = repo.workdir().ok_or_else(|| anyhow::anyhow!("bare repo"))?.to_path_buf();
+    let rel = file.strip_prefix(&workdir)?;
+    let mut cb = git2::build::CheckoutBuilder::new();
+    cb.path(rel);
+    cb.force();
+    repo.checkout_head(Some(&mut cb))?;
+    Ok(())
+}
 
 pub fn branch(path: &Path) -> Option<String> {
     let repo = git2::Repository::discover(path).ok()?;

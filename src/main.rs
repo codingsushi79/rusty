@@ -8,7 +8,7 @@ mod config;
 mod git;
 mod highlight;
 mod lsp;
-mod shell;
+mod term;
 mod tree;
 mod ui;
 
@@ -80,7 +80,7 @@ fn run<B: ratatui::backend::Backend>(
         if app.lsp_poll() {
             dirty = true;
         }
-        if app.shell_poll() {
+        if app.term_poll() {
             dirty = true;
         }
         if app.tick() {

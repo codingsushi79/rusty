@@ -15,7 +15,7 @@ use crate::config::Settings;
 use crate::git;
 use crate::highlight::Highlighter;
 use crate::lsp::{self, Lsp};
-use crate::shell::Shell;
+use crate::term::Terminal;
 use crate::tree::{Entry, Tree};
 
 /// The GitHub repo this build installs/updates from.
@@ -34,6 +34,14 @@ pub struct Diagnostic {
 pub struct Completion {
     pub items: Vec<(String, String)>, // (label, insert text)
     pub sel: usize,
+}
+
+/// Which kind of LSP request a pending response id belongs to.
+#[derive(Clone, Copy)]
+pub enum Req {
+    Completion,
+    Definition,
+    Hover,
 }
 
 fn uri_of(path: &Path) -> String {
@@ -78,6 +86,9 @@ pub enum Action {
     ToggleTree,
     StageFile,
     StageAll,
+    Discard,
+    GotoDef,
+    Hover,
     CommitPrompt,
     GitInit,
     AddRemotePrompt,
@@ -94,6 +105,7 @@ pub enum PromptKind {
     Commit,
     Delete(PathBuf),
     AddRemote,
+    Discard(PathBuf),
 }
 
 /// A one-line text prompt (create a file, or a commit message).
@@ -125,11 +137,8 @@ pub struct App {
     pub search_results: Vec<Hit>,
     pub search_sel: usize,
 
-    pub shell: Option<Shell>,
-    shell_rx: Option<Receiver<String>>,
-    pub shell_output: String,
-    pub shell_input: String,
-    pub shell_open: bool,
+    pub term: Option<Terminal>,
+    pub term_open: bool,
 
     pub settings: Settings,
     pub settings_sel: usize,
@@ -147,7 +156,8 @@ pub struct App {
     lsp_sent: HashMap<String, u64>,
     pub diagnostics: HashMap<String, Vec<Diagnostic>>,
     pub completion: Option<Completion>,
-    pending_completion: Option<i64>,
+    pending: HashMap<i64, Req>,
+    pub git_status_map: HashMap<PathBuf, char>,
 
     pub layout: LayoutInfo,
     pub editor_height: usize,
@@ -183,11 +193,8 @@ impl App {
             search_in_replace: false,
             search_results: Vec::new(),
             search_sel: 0,
-            shell: None,
-            shell_rx: None,
-            shell_output: String::new(),
-            shell_input: String::new(),
-            shell_open: false,
+            term: None,
+            term_open: false,
             settings,
             settings_sel: 0,
             jobs: Vec::new(),
@@ -200,7 +207,8 @@ impl App {
             lsp_sent: HashMap::new(),
             diagnostics: HashMap::new(),
             completion: None,
-            pending_completion: None,
+            pending: HashMap::new(),
+            git_status_map: git::statuses(root),
             layout: LayoutInfo::default(),
             editor_height: 20,
             editor_width: 80,
@@ -279,8 +287,11 @@ impl App {
     /// Drain server messages (diagnostics, completion responses). Returns true
     /// if anything changed that warrants a redraw.
     pub fn lsp_poll(&mut self) -> bool {
-        let Some(l) = &self.lsp else { return false };
-        let msgs = l.drain();
+        // Drain first so we don't hold a borrow of `self.lsp` while dispatching.
+        let msgs = match &self.lsp {
+            Some(l) => l.drain(),
+            None => return false,
+        };
         if msgs.is_empty() {
             return false;
         }
@@ -300,45 +311,112 @@ impl App {
                 }
                 self.diagnostics.insert(uri, ds);
             } else if let Some(id) = v.get("id").and_then(|i| i.as_i64()) {
-                if Some(id) == self.pending_completion {
-                    self.pending_completion = None;
-                    let result = &v["result"];
-                    let arr = if result.is_array() { result.clone() } else { result["items"].clone() };
-                    let mut items = Vec::new();
-                    if let Some(list) = arr.as_array() {
-                        for it in list.iter().take(80) {
-                            let label = it["label"].as_str().unwrap_or("").to_string();
-                            let insert = it["insertText"]
-                                .as_str()
-                                .or_else(|| it["textEdit"]["newText"].as_str())
-                                .unwrap_or(&label)
-                                .to_string();
-                            if !label.is_empty() {
-                                items.push((label, insert));
-                            }
-                        }
-                    }
-                    if items.is_empty() {
-                        self.status = "No completions".to_string();
-                    } else {
-                        self.completion = Some(Completion { items, sel: 0 });
-                    }
+                match self.pending.remove(&id) {
+                    Some(Req::Completion) => self.handle_completion(&v["result"]),
+                    Some(Req::Definition) => self.handle_definition(v["result"].clone()),
+                    Some(Req::Hover) => self.handle_hover(&v["result"]),
+                    None => {}
                 }
             }
         }
         true
     }
 
+    fn handle_completion(&mut self, result: &serde_json::Value) {
+        let arr = if result.is_array() { result.clone() } else { result["items"].clone() };
+        let mut items = Vec::new();
+        if let Some(list) = arr.as_array() {
+            for it in list.iter().take(80) {
+                let label = it["label"].as_str().unwrap_or("").to_string();
+                let insert = it["insertText"]
+                    .as_str()
+                    .or_else(|| it["textEdit"]["newText"].as_str())
+                    .unwrap_or(&label)
+                    .to_string();
+                if !label.is_empty() {
+                    items.push((label, insert));
+                }
+            }
+        }
+        if items.is_empty() {
+            self.status = "No completions".to_string();
+        } else {
+            self.completion = Some(Completion { items, sel: 0 });
+        }
+    }
+
+    fn handle_hover(&mut self, result: &serde_json::Value) {
+        let contents = &result["contents"];
+        let text = if let Some(s) = contents.as_str() {
+            s.to_string()
+        } else if let Some(s) = contents["value"].as_str() {
+            s.to_string()
+        } else if let Some(arr) = contents.as_array() {
+            arr.first()
+                .and_then(|c| c.as_str().or_else(|| c["value"].as_str()))
+                .unwrap_or("")
+                .to_string()
+        } else {
+            String::new()
+        };
+        let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty() && !l.starts_with("```")).collect();
+        // Prefer a signature-like line (has a space) over a bare module path.
+        let line = lines.iter().find(|l| l.contains(' ')).or_else(|| lines.first()).copied().unwrap_or("");
+        self.status = if line.is_empty() { "No hover info".to_string() } else { line.trim().to_string() };
+    }
+
+    fn handle_definition(&mut self, result: serde_json::Value) {
+        let loc = if result.is_array() { result.get(0).cloned().unwrap_or(serde_json::Value::Null) } else { result };
+        let uri = loc["uri"].as_str().or_else(|| loc["targetUri"].as_str());
+        let range = if loc.get("range").is_some() { &loc["range"] } else { &loc["targetSelectionRange"] };
+        if let Some(uri) = uri {
+            let line = range["start"]["line"].as_u64().unwrap_or(0) as usize;
+            let ch = range["start"]["character"].as_u64().unwrap_or(0) as usize;
+            let path = PathBuf::from(uri.strip_prefix("file://").unwrap_or(uri));
+            self.open_path(&path);
+            if let Some(b) = self.buffers.get_mut(self.active) {
+                b.set_cursor(line, ch);
+            }
+        } else {
+            self.status = "No definition found".to_string();
+        }
+    }
+
     fn trigger_completion(&mut self) {
-        let Some(b) = self.buffers.get(self.active) else { return };
-        let Some(path) = b.path.clone() else { return };
-        let (line, col) = (b.row, b.col);
-        let uri = uri_of(&path);
-        if let Some(l) = &mut self.lsp {
-            let id = l.completion(&uri, line, col);
-            self.pending_completion = Some(id);
+        if let Some(id) = self.lsp_request_at_cursor(|l, uri, line, col| l.completion(uri, line, col)) {
+            self.pending.insert(id, Req::Completion);
             self.status = "Completing…".to_string();
         }
+    }
+
+    fn trigger_definition(&mut self) {
+        if let Some(id) = self.lsp_request_at_cursor(|l, uri, line, col| l.definition(uri, line, col)) {
+            self.pending.insert(id, Req::Definition);
+            self.status = "Go to definition…".to_string();
+        }
+    }
+
+    fn trigger_hover(&mut self) {
+        if let Some(id) = self.lsp_request_at_cursor(|l, uri, line, col| l.hover(uri, line, col)) {
+            self.pending.insert(id, Req::Hover);
+        }
+    }
+
+    /// Issue an LSP request positioned at the current cursor; returns its id.
+    fn lsp_request_at_cursor(
+        &mut self,
+        f: impl FnOnce(&mut Lsp, &str, usize, usize) -> i64,
+    ) -> Option<i64> {
+        let b = self.buffers.get(self.active)?;
+        let path = b.path.clone()?;
+        let (line, col) = (b.row, b.col);
+        let uri = uri_of(&path);
+        let l = self.lsp.as_mut()?;
+        Some(f(l, &uri, line, col))
+    }
+
+    pub fn refresh_git_status(&mut self) {
+        self.git_status_map = git::statuses(&self.tree.root);
     }
 
     fn accept_completion(&mut self) {
@@ -360,6 +438,7 @@ impl App {
                 b.set_head(h);
             }
         }
+        self.refresh_git_status();
     }
 
     fn save(&mut self) {
@@ -372,6 +451,7 @@ impl App {
             Ok(()) => self.status = format!("Saved {}", buf.name()),
             Err(e) => self.status = format!("Save failed: {e}"),
         }
+        self.refresh_git_status();
     }
 
     fn close_active(&mut self) {
@@ -446,6 +526,7 @@ impl App {
                 if let Some(i) = self.tree.visible_index(&path) {
                     self.tree.selected = i;
                 }
+                self.refresh_git_status();
                 self.status = format!("Created {}", path.display());
             }
             PromptKind::Commit => {
@@ -459,6 +540,23 @@ impl App {
                     Err(e) => self.status = format!("Commit failed: {e}"),
                 }
                 self.refresh_head();
+            }
+            PromptKind::Discard(path) => {
+                self.focus = Focus::Editor;
+                match git::discard(&path) {
+                    Ok(()) => {
+                        // Reload the buffer from disk to reflect the restored file.
+                        if let Some(i) = self.buffers.iter().position(|b| b.path.as_deref() == Some(&path)) {
+                            if let Ok(mut nb) = Buffer::from_file(&path) {
+                                nb.set_head(git::head_text(&path));
+                                self.buffers[i] = nb;
+                            }
+                        }
+                        self.status = "Discarded changes".to_string();
+                    }
+                    Err(e) => self.status = format!("Discard failed: {e}"),
+                }
+                self.refresh_git_status();
             }
             PromptKind::AddRemote => {
                 self.focus = Focus::Editor;
@@ -488,6 +586,7 @@ impl App {
                         self.tree.reload();
                         let vis = self.tree.visible().len();
                         self.tree.selected = self.tree.selected.min(vis.saturating_sub(1));
+                        self.refresh_git_status();
                         self.status = format!("Deleted {}", path.display());
                     }
                     Err(e) => self.status = format!("Delete failed: {e}"),
@@ -499,6 +598,11 @@ impl App {
     // --- input -------------------------------------------------------------
 
     pub fn on_key(&mut self, key: KeyEvent) {
+        // When the terminal is focused, it captures all input.
+        if self.focus == Focus::Shell {
+            self.terminal_key(key);
+            return;
+        }
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         if ctrl {
             match key.code {
@@ -604,6 +708,10 @@ impl App {
                     self.trigger_completion();
                     return;
                 }
+                KeyCode::Char('k') => {
+                    self.trigger_hover();
+                    return;
+                }
                 _ => {}
             }
         }
@@ -614,7 +722,7 @@ impl App {
             Focus::Find => self.find_key(key),
             Focus::Prompt => self.prompt_key(key),
             Focus::Search => self.search_key(key),
-            Focus::Shell => self.shell_key(key),
+            Focus::Shell => {} // handled above
             Focus::Settings => self.settings_key(key),
         }
     }
@@ -731,55 +839,46 @@ impl App {
     }
 
     fn toggle_shell(&mut self) {
-        if !self.shell_open {
-            self.shell_open = true;
+        if !self.term_open {
+            self.term_open = true;
             self.focus = Focus::Shell;
-            if self.shell.is_none() {
-                let (s, rx) = Shell::new(self.tree.root.clone());
-                self.shell = Some(s);
-                self.shell_rx = Some(rx);
+            if self.term.is_none() {
+                match Terminal::spawn(self.tree.root.clone(), 24, 80) {
+                    Ok(t) => self.term = Some(t),
+                    Err(e) => {
+                        self.status = format!("Could not start terminal: {e}");
+                        self.term_open = false;
+                        self.focus = Focus::Editor;
+                    }
+                }
             }
         } else if self.focus != Focus::Shell {
             self.focus = Focus::Shell;
         } else {
-            self.shell_open = false;
+            self.term_open = false;
             self.focus = Focus::Editor;
         }
     }
 
-    fn shell_key(&mut self, key: KeyEvent) {
-        match key.code {
-            KeyCode::Esc => self.focus = Focus::Editor,
-            KeyCode::Enter => {
-                let cmd = std::mem::take(&mut self.shell_input);
-                if cmd.trim() == "clear" {
-                    self.shell_output.clear();
-                } else if let Some(s) = &mut self.shell {
-                    s.run(&cmd);
-                }
-            }
-            KeyCode::Backspace => {
-                self.shell_input.pop();
-            }
-            KeyCode::Char(c) if !is_control_combo(&key) => self.shell_input.push(c),
-            _ => {}
+    /// While the terminal is focused, keys go straight to the PTY (so `vim`,
+    /// `Ctrl+C`, arrows all work); `Ctrl+J` is the escape hatch back to the editor.
+    fn terminal_key(&mut self, key: KeyEvent) {
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('j') {
+            self.toggle_shell();
+            return;
+        }
+        if let Some(t) = &mut self.term {
+            t.key(key);
         }
     }
 
-    /// Drain shell output into the pane. Returns true if anything changed.
-    pub fn shell_poll(&mut self) -> bool {
-        let mut changed = false;
-        if let Some(rx) = &self.shell_rx {
-            for chunk in rx.try_iter() {
-                self.shell_output.push_str(&chunk);
-                changed = true;
-            }
+    /// Drain PTY output into the emulator. Returns true if anything changed.
+    pub fn term_poll(&mut self) -> bool {
+        if let Some(t) = &mut self.term {
+            t.poll()
+        } else {
+            false
         }
-        if changed && self.shell_output.len() > 100_000 {
-            let cut = self.shell_output.len() - 80_000;
-            self.shell_output = self.shell_output.split_off(cut);
-        }
-        changed
     }
 
     /// Replace every exact occurrence of the search query across matched files.
@@ -987,6 +1086,10 @@ impl App {
             }
             return;
         }
+        if key.code == KeyCode::F(12) {
+            self.trigger_definition();
+            return;
+        }
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
         let h = self.editor_height;
         let tab = self.settings.tab_size;
@@ -1165,17 +1268,20 @@ impl App {
     }
 
     pub fn palette_items(&self) -> Vec<(String, Action)> {
-        let cmds: [(&str, &str, Action); 15] = [
+        let cmds: [(&str, &str, Action); 18] = [
             ("Save File", "save", Action::Save),
             ("New File", "new file create", Action::NewFile),
             ("Close Buffer", "close", Action::Close),
             ("Toggle File Tree", "tree files", Action::ToggleTree),
+            ("Go to Definition", "go to definition lsp symbol", Action::GotoDef),
+            ("Hover (type info)", "hover type info lsp", Action::Hover),
             ("Preferences: Settings", "settings preferences config", Action::Settings),
             ("Rusty: Update (reinstall latest)", "update upgrade", Action::Update),
             ("Git: Initialize Repository", "git initialize repository init create", Action::GitInit),
             ("Git: Add Remote…", "git add remote origin url", Action::AddRemotePrompt),
             ("Git: Stage Current File", "git stage current file add", Action::StageFile),
             ("Git: Stage All Changes", "git stage all changes add bulk", Action::StageAll),
+            ("Git: Discard Changes (current file)", "git discard revert changes current file", Action::Discard),
             ("Git: Commit…", "git commit", Action::CommitPrompt),
             ("Git: Push", "git push upload origin", Action::Push),
             ("Git: Pull", "git pull update origin", Action::Pull),
@@ -1230,6 +1336,19 @@ impl App {
                 }
                 self.refresh_head();
             }
+            Action::Discard => {
+                if let Some(p) = self.buffers.get(self.active).and_then(|b| b.path.clone()) {
+                    let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                    self.prompt = Some(Prompt {
+                        label: format!("Discard all changes in '{name}'?"),
+                        input: String::new(),
+                        kind: PromptKind::Discard(p),
+                    });
+                    self.focus = Focus::Prompt;
+                } else {
+                    self.status = "No file to discard".to_string();
+                }
+            }
             Action::AddRemotePrompt => {
                 self.prompt = Some(Prompt {
                     label: "Remote URL (origin):".to_string(),
@@ -1246,6 +1365,8 @@ impl App {
                 });
                 self.focus = Focus::Prompt;
             }
+            Action::GotoDef => self.trigger_definition(),
+            Action::Hover => self.trigger_hover(),
             Action::Settings => {
                 self.focus = Focus::Settings;
                 self.settings_sel = 0;

@@ -42,9 +42,10 @@ rusty ./my-proj  # open a folder
 | --- | --- |
 | `Ctrl+P` | command palette — fuzzy-open files & run commands |
 | `Ctrl+G` | search across files (Tab → replace field, `Ctrl+R` = replace all) |
-| `Ctrl+J` | toggle the integrated terminal pane |
+| `Ctrl+J` | toggle the interactive terminal pane (and return from it) |
 | `Ctrl+F` | find in file (Enter = next, Esc = close) |
 | `Ctrl+Space` | LSP completion (↑/↓ select, Enter/Tab accept, Esc dismiss) |
+| `F12` | go to definition · `Ctrl+K` hover type info |
 | `Ctrl+N` | new file — pick a spot in the tree, type `name.ext` |
 | `Ctrl+,` | settings screen |
 | `Ctrl+S` | save |
@@ -73,16 +74,20 @@ rusty ./my-proj  # open a folder
 - **Command palette** (`Ctrl+P`) — fuzzy over commands + every file.
 - **Find in file** (`Ctrl+F`) and **workspace search & replace** (`Ctrl+G`) —
   live results across files; `Ctrl+R` replaces all occurrences on disk.
-- **Integrated terminal** (`Ctrl+J`) — run commands in the workspace, output
-  streams into a bottom pane; `cd` persists.
-- **LSP** — diagnostics (in the gutter, status counts, and the hint bar) and
-  completion (`Ctrl+Space`). Auto-starts a server for the file's language if one
-  is on your `PATH`.
+- **Integrated terminal** (`Ctrl+J`) — a **fully interactive PTY** running your
+  `$SHELL` in a bottom pane, with colors and cursor addressing, so `vim`, `top`,
+  `less`, etc. work. While focused, keys go to the shell; `Ctrl+J` returns to
+  the editor.
+- **LSP** — diagnostics (in the gutter, status counts, and the hint bar),
+  completion (`Ctrl+Space`), **go-to-definition** (`F12`), and **hover** type
+  info (`Ctrl+K`) — also in the palette. Auto-starts a server for the file's
+  language if one is on your `PATH`.
 - **Git** — a **diff gutter** (added / modified / removed markers vs HEAD),
-  plus **init repo**, **add remote**, **stage file / stage all**, **commit**,
-  **push / pull / fetch** from the palette. Network commands run **in the
-  background** (no pane) using your existing git credentials, and report the
-  result in the status bar.
+  **file-tree decorations** (`M`/`A`/`U`/`D` badges with colored names), plus
+  **init repo**, **add remote**, **stage file / stage all**, **discard changes**,
+  **commit**, and **push / pull / fetch** from the palette. Network commands run
+  **in the background** (no pane) using your existing git credentials, and report
+  the result in the status bar.
 - **Settings** (`Ctrl+,`) — tab size, line numbers, syntax theme; saved to
   `~/.config/rusty/config.toml` (or the platform equivalent).
 - **Self-update** — `Rusty: Update` in the palette reinstalls the latest build.
@@ -106,7 +111,6 @@ LSP auto-starts if the server binary is on your `PATH`:
 | Feature | Notes |
 | --- | --- |
 | **LSP go-to-definition / hover** | jump to symbols, show types on demand |
-| **Full interactive terminal** | a real PTY (for `vim`/`top`) alongside the runner |
 | **Extensions & local AI** | scripting hooks; opt-in local model, no telemetry |
 | **Config & themes** | `~/.config/rusty/config.toml`, selectable themes |
 
@@ -123,7 +127,7 @@ src/
   config.rs      settings (tab size, line numbers, theme) load/save
   git.rs         branch, HEAD blob (diff gutter), init, remote, stage, commit
   lsp.rs         JSON-RPC language-server client (diagnostics, completion)
-  shell.rs       integrated terminal pane (command runner)
+  term.rs        interactive PTY terminal (vt100 emulator + key encoding)
 ```
 
 ## License

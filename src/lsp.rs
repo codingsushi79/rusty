@@ -130,6 +130,20 @@ impl Lsp {
         )
     }
 
+    pub fn definition(&mut self, uri: &str, line: usize, character: usize) -> i64 {
+        self.request(
+            "textDocument/definition",
+            json!({"textDocument": {"uri": uri}, "position": {"line": line, "character": character}}),
+        )
+    }
+
+    pub fn hover(&mut self, uri: &str, line: usize, character: usize) -> i64 {
+        self.request(
+            "textDocument/hover",
+            json!({"textDocument": {"uri": uri}, "position": {"line": line, "character": character}}),
+        )
+    }
+
     /// Drain all messages received since the last call.
     pub fn drain(&self) -> Vec<Value> {
         self.rx.try_iter().collect()
