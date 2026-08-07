@@ -79,8 +79,9 @@ rusty ./my-proj  # open a folder
   completion (`Ctrl+Space`). Auto-starts a server for the file's language if one
   is on your `PATH`.
 - **Git** — a **diff gutter** (added / modified / removed markers vs HEAD),
-  plus **init repo**, **add remote**, **stage file / stage all**, and **commit**
-  from the palette.
+  plus **init repo**, **add remote**, **stage file / stage all**, **commit**,
+  **push / pull / fetch** from the palette (network commands run in the terminal
+  pane, so they use your existing git credentials).
 - **Settings** (`Ctrl+,`) — tab size, line numbers, syntax theme; saved to
   `~/.config/rusty/config.toml` (or the platform equivalent).
 - **Self-update** — `Rusty: Update` in the palette reinstalls the latest build.

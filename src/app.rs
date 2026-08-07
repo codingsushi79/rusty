@@ -79,6 +79,9 @@ pub enum Action {
     CommitPrompt,
     GitInit,
     AddRemotePrompt,
+    Push,
+    Pull,
+    Fetch,
     Settings,
     Update,
     Quit,
@@ -653,6 +656,20 @@ impl App {
         }
     }
 
+    /// Open/focus the terminal pane and run a command in it.
+    fn run_in_shell(&mut self, cmd: &str) {
+        if self.shell.is_none() {
+            let (s, rx) = Shell::new(self.tree.root.clone());
+            self.shell = Some(s);
+            self.shell_rx = Some(rx);
+        }
+        self.shell_open = true;
+        self.focus = Focus::Shell;
+        if let Some(s) = &mut self.shell {
+            s.run(cmd);
+        }
+    }
+
     fn toggle_shell(&mut self) {
         if !self.shell_open {
             self.shell_open = true;
@@ -1088,7 +1105,7 @@ impl App {
     }
 
     pub fn palette_items(&self) -> Vec<(String, Action)> {
-        let cmds: [(&str, &str, Action); 12] = [
+        let cmds: [(&str, &str, Action); 15] = [
             ("Save File", "save", Action::Save),
             ("New File", "new file create", Action::NewFile),
             ("Close Buffer", "close", Action::Close),
@@ -1100,6 +1117,9 @@ impl App {
             ("Git: Stage Current File", "git stage current file add", Action::StageFile),
             ("Git: Stage All Changes", "git stage all changes add bulk", Action::StageAll),
             ("Git: Commit…", "git commit", Action::CommitPrompt),
+            ("Git: Push", "git push upload origin", Action::Push),
+            ("Git: Pull", "git pull update origin", Action::Pull),
+            ("Git: Fetch", "git fetch origin", Action::Fetch),
             ("Quit", "quit exit", Action::Quit),
         ];
         let q = self.palette_query.trim();
@@ -1170,18 +1190,21 @@ impl App {
                 self.focus = Focus::Settings;
                 self.settings_sel = 0;
             }
+            Action::Push => {
+                // Uses the user's configured git credentials via the shell.
+                self.run_in_shell("git push -u origin HEAD");
+                self.status = "Pushing to origin…".to_string();
+            }
+            Action::Pull => {
+                self.run_in_shell("git pull");
+                self.status = "Pulling from origin…".to_string();
+            }
+            Action::Fetch => {
+                self.run_in_shell("git fetch --all");
+                self.status = "Fetching…".to_string();
+            }
             Action::Update => {
-                // Reinstall the latest from GitHub, streaming output in the shell pane.
-                if self.shell.is_none() {
-                    let (s, rx) = Shell::new(self.tree.root.clone());
-                    self.shell = Some(s);
-                    self.shell_rx = Some(rx);
-                }
-                self.shell_open = true;
-                self.focus = Focus::Shell;
-                if let Some(s) = &mut self.shell {
-                    s.run(&format!("cargo install --git {REPO_URL} --force"));
-                }
+                self.run_in_shell(&format!("cargo install --git {REPO_URL} --force"));
                 self.status = "Updating Rusty… restart when it finishes".to_string();
             }
             Action::Quit => self.quit = true,
