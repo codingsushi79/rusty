@@ -24,9 +24,9 @@ No Rust yet? The bootstrap scripts install it for you:
 
 ```bash
 # macOS / Linux
-curl -fsSL https://raw.githubusercontent.com/codingsushi79/rusty/main/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/codingsushi79/rusty/master/scripts/install.sh | sh
 # Windows (PowerShell)
-irm https://raw.githubusercontent.com/codingsushi79/rusty/main/scripts/install.ps1 | iex
+irm https://raw.githubusercontent.com/codingsushi79/rusty/master/scripts/install.ps1 | iex
 ```
 
 Or run from source: `cargo run --release -- .`
