@@ -6,7 +6,7 @@
 # so you can run `rusty <dir>` in any terminal.
 $ErrorActionPreference = 'Stop'
 $Repo   = if ($env:RUSTY_REPO)   { $env:RUSTY_REPO }   else { 'https://github.com/codingsushi79/rusty' }
-$Branch = if ($env:RUSTY_BRANCH) { $env:RUSTY_BRANCH } else { 'main' }
+$Branch = if ($env:RUSTY_BRANCH) { $env:RUSTY_BRANCH } else { 'master' }
 $Dest   = Join-Path $env:LOCALAPPDATA 'Programs\Rusty'
 function Say($m) { Write-Host "▸ $m" -ForegroundColor DarkYellow }
 
