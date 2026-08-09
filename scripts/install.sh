@@ -1,14 +1,14 @@
 #!/usr/bin/env sh
 # Rusty installer — macOS & Linux.
 #
-#   curl -fsSL https://raw.githubusercontent.com/codingsushi79/rusty/main/scripts/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/codingsushi79/rusty/master/scripts/install.sh | sh
 #
 # Builds Rusty and installs the `rusty` command to ~/.local/bin, so you can run
 # `rusty <dir>` in any terminal.
 set -eu
 
 REPO="${RUSTY_REPO:-https://github.com/codingsushi79/rusty}"
-BRANCH="${RUSTY_BRANCH:-main}"
+BRANCH="${RUSTY_BRANCH:-master}"
 BINDIR="${RUSTY_BINDIR:-$HOME/.local/bin}"
 say() { printf '\033[1;38;5;208m▸\033[0m %s\n' "$1"; }
 die() { printf '\033[1;31m✗ %s\033[0m\n' "$1" >&2; exit 1; }
