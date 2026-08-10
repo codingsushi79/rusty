@@ -1,3 +1,7 @@
+![GitHub top language](https://img.shields.io/github/languages/top/codingsushi79/rusty)
+![GitHub commit activity](https://img.shields.io/github/commit-activity/m/codingsushi79/rusty)
+![GitHub last commit](https://img.shields.io/github/last-commit/codingsushi79/rusty)
+
 # Rusty
 
 A fast, friendly **terminal** code editor written in Rust. Run `rusty <dir>` in
@@ -132,4 +136,4 @@ src/
 
 ## License
 
-MIT OR Apache-2.0.
+[MIT](./LICENSE-MIT) OR [Apache-2.0](./LICENSE-Apache-2.0).
