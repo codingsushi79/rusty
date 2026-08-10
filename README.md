@@ -1,6 +1,6 @@
-![GitHub top language](https://img.shields.io/github/languages/top/codingsushi79/rusty)
-![GitHub commit activity](https://img.shields.io/github/commit-activity/m/codingsushi79/rusty)
-![GitHub last commit](https://img.shields.io/github/last-commit/codingsushi79/rusty)
+![Contributors](https://img.shields.io/github/contributors/codingsushi79/rusty?color=blue)
+![GitHub commit activity](https://img.shields.io/github/commit-activity/m/codingsushi79/rusty?color=blue)
+![GitHub last commit](https://img.shields.io/github/last-commit/codingsushi79/rusty?color=blue)
 
 # Rusty
 
