@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::mpsc::{channel, Receiver, TryRecvError};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
@@ -21,7 +21,7 @@ use crate::tree::{Entry, Tree};
 /// The GitHub repo this build installs/updates from.
 pub const REPO_URL: &str = "https://github.com/codingsushi79/rusty";
 /// Number of rows in the settings screen (for selection wrap).
-pub const SETTINGS_COUNT: usize = 3;
+pub const SETTINGS_COUNT: usize = 5;
 
 /// A diagnostic (error/warning) from the language server.
 pub struct Diagnostic {
@@ -58,10 +58,18 @@ pub enum Focus {
     Search,
     Shell,
     Settings,
+    Branches,
 }
 
 /// One workspace-search hit: (file, 0-indexed line, trimmed line text).
 pub type Hit = (PathBuf, usize, String);
+
+/// Editing mode when Vim mode is enabled.
+#[derive(PartialEq, Eq, Clone, Copy)]
+pub enum Mode {
+    Insert,
+    Normal,
+}
 
 /// Screen rectangles from the last frame, used to map mouse coordinates.
 #[derive(Default, Clone)]
@@ -89,14 +97,29 @@ pub enum Action {
     Discard,
     GotoDef,
     Hover,
+    GotoLinePrompt,
+    RunExtension(usize),
+    AiEnable,
+    AiAskPrompt,
+    AiExplain,
+    AiSetModelPrompt,
+    AiSetEndpointPrompt,
+    AiSetTokenPrompt,
+    AiToggle,
     CommitPrompt,
     GitInit,
     AddRemotePrompt,
     Push,
     Pull,
     Fetch,
+    SwitchBranch,
+    RenameBranchPrompt,
+    DeleteBranchPrompt,
+    PublishBranch,
     Settings,
     Update,
+    OpenLog,
+    ToggleVim,
     Quit,
 }
 
@@ -106,6 +129,13 @@ pub enum PromptKind {
     Delete(PathBuf),
     AddRemote,
     Discard(PathBuf),
+    RenameBranch,
+    DeleteBranch,
+    GotoLine,
+    AiAsk,
+    AiModel,
+    AiEndpoint,
+    AiToken,
 }
 
 /// A one-line text prompt (create a file, or a commit message).
@@ -140,13 +170,26 @@ pub struct App {
     pub term: Option<Terminal>,
     pub term_open: bool,
 
+    pub extensions: Vec<crate::extensions::Extension>,
+    pub ai_open: bool,
+    pub ai_output: String,
+    ai_rx: Option<Receiver<String>>,
+
     pub settings: Settings,
     pub settings_sel: usize,
+
+    pub mode: Mode,
+    vim_pending: Option<char>,
+
+    pub branch_list: Vec<String>,
+    pub branch_query: String,
+    pub branch_sel: usize,
 
     // Background jobs (hidden terminal) → each yields a final (ok, message).
     jobs: Vec<Receiver<(bool, String)>>,
     last_status: String,
     status_time: Instant,
+    last_tree_scan: Instant,
 
     clipboard: String,
     sys_clip: Option<arboard::Clipboard>,
@@ -173,6 +216,7 @@ impl App {
         let settings = Settings::load();
         let mut hl = Highlighter::new();
         hl.set_theme(&settings.syntax_theme);
+        let start_mode = if settings.vim_mode { Mode::Normal } else { Mode::Insert };
         Ok(Self {
             tree,
             tree_state,
@@ -195,11 +239,21 @@ impl App {
             search_sel: 0,
             term: None,
             term_open: false,
+            extensions: crate::extensions::discover(root),
+            ai_open: false,
+            ai_output: String::new(),
+            ai_rx: None,
             settings,
             settings_sel: 0,
+            mode: start_mode,
+            vim_pending: None,
+            branch_list: Vec::new(),
+            branch_query: String::new(),
+            branch_sel: 0,
             jobs: Vec::new(),
             last_status: String::new(),
             status_time: Instant::now(),
+            last_tree_scan: Instant::now(),
             clipboard: String::new(),
             sys_clip: arboard::Clipboard::new().ok(),
             lsp: None,
@@ -240,7 +294,7 @@ impl App {
                     self.status = format!("Opened {}", path.display());
                     self.lsp_open(path);
                 }
-                Err(e) => self.status = format!("Open failed: {e}"),
+                Err(e) => self.err(format!("Open failed: {e}")),
             }
         }
         self.focus = Focus::Editor;
@@ -419,6 +473,67 @@ impl App {
         self.git_status_map = git::statuses(&self.tree.root);
     }
 
+    /// Branches matching the filter query.
+    pub fn branches_filtered(&self) -> Vec<String> {
+        let q = self.branch_query.trim().to_lowercase();
+        self.branch_list.iter().filter(|b| q.is_empty() || b.to_lowercase().contains(&q)).cloned().collect()
+    }
+
+    fn branches_key(&mut self, key: KeyEvent) {
+        let filtered = self.branches_filtered();
+        match key.code {
+            KeyCode::Esc => self.focus = Focus::Editor,
+            KeyCode::Up => self.branch_sel = self.branch_sel.saturating_sub(1),
+            KeyCode::Down => self.branch_sel = (self.branch_sel + 1).min(filtered.len().saturating_sub(1)),
+            KeyCode::Backspace => {
+                self.branch_query.pop();
+                self.branch_sel = 0;
+            }
+            KeyCode::Char(c) if !is_control_combo(&key) => {
+                self.branch_query.push(c);
+                self.branch_sel = 0;
+            }
+            KeyCode::Enter => {
+                self.focus = Focus::Editor;
+                if let Some(name) = filtered.get(self.branch_sel).cloned() {
+                    match git::checkout_branch(&self.tree.root, &name) {
+                        Ok(()) => {
+                            self.reload_after_git();
+                            self.status = format!("Switched to branch '{name}'");
+                        }
+                        Err(e) => self.status = format!("Checkout failed: {e}"),
+                    }
+                } else if !self.branch_query.trim().is_empty() {
+                    let name = self.branch_query.trim().to_string();
+                    match git::create_branch(&self.tree.root, &name) {
+                        Ok(()) => {
+                            self.reload_after_git();
+                            self.status = format!("Created and switched to '{name}'");
+                        }
+                        Err(e) => self.status = format!("Create branch failed: {e}"),
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// After a checkout/branch change, reload buffers, tree, and git state.
+    fn reload_after_git(&mut self) {
+        for i in 0..self.buffers.len() {
+            if let Some(p) = self.buffers[i].path.clone() {
+                if p.exists() {
+                    if let Ok(mut nb) = Buffer::from_file(&p) {
+                        nb.set_head(git::head_text(&p));
+                        self.buffers[i] = nb;
+                    }
+                }
+            }
+        }
+        self.tree.reload();
+        self.refresh_head();
+    }
+
     fn accept_completion(&mut self) {
         if let Some(c) = self.completion.take() {
             if let Some((_, insert)) = c.items.get(c.sel).cloned() {
@@ -449,7 +564,7 @@ impl App {
         }
         match buf.save() {
             Ok(()) => self.status = format!("Saved {}", buf.name()),
-            Err(e) => self.status = format!("Save failed: {e}"),
+            Err(e) => self.err(format!("Save failed: {e}")),
         }
         self.refresh_git_status();
     }
@@ -540,6 +655,72 @@ impl App {
                     Err(e) => self.status = format!("Commit failed: {e}"),
                 }
                 self.refresh_head();
+            }
+            PromptKind::GotoLine => {
+                self.focus = Focus::Editor;
+                if let Ok(n) = input.trim().parse::<usize>() {
+                    if let Some(b) = self.buffers.get_mut(self.active) {
+                        b.set_cursor(n.saturating_sub(1), 0);
+                    }
+                }
+            }
+            PromptKind::AiAsk => {
+                self.focus = Focus::Editor;
+                if !input.is_empty() {
+                    let ctx = self.buffers.get(self.active).map(|b| b.text()).unwrap_or_default();
+                    let prompt = if ctx.trim().is_empty() {
+                        input.clone()
+                    } else {
+                        format!("Current file:\n```\n{ctx}\n```\n\nQuestion: {input}")
+                    };
+                    self.ai_ask(&prompt);
+                }
+            }
+            PromptKind::AiModel => {
+                self.focus = Focus::Editor;
+                if !input.is_empty() {
+                    self.settings.ai_model = input.clone();
+                    self.settings.save();
+                    self.status = format!("AI model set to '{input}'");
+                }
+            }
+            PromptKind::AiEndpoint => {
+                self.focus = Focus::Editor;
+                if !input.is_empty() {
+                    self.settings.ai_endpoint = input.clone();
+                    self.settings.save();
+                    self.status = format!("AI endpoint set to '{input}'");
+                }
+            }
+            PromptKind::AiToken => {
+                self.focus = Focus::Editor;
+                // Blank input clears the token.
+                self.settings.ai_api_key = input.clone();
+                self.settings.save();
+                self.status = if input.is_empty() {
+                    "AI token cleared".to_string()
+                } else {
+                    "AI token saved".to_string()
+                };
+            }
+            PromptKind::RenameBranch => {
+                self.focus = Focus::Editor;
+                if !input.is_empty() {
+                    match git::rename_branch(&self.tree.root, &input) {
+                        Ok(()) => self.status = format!("Renamed branch to '{input}'"),
+                        Err(e) => self.status = format!("Rename failed: {e}"),
+                    }
+                    self.refresh_head();
+                }
+            }
+            PromptKind::DeleteBranch => {
+                self.focus = Focus::Editor;
+                if !input.is_empty() {
+                    match git::delete_branch(&self.tree.root, &input) {
+                        Ok(()) => self.status = format!("Deleted branch '{input}'"),
+                        Err(e) => self.status = format!("Delete branch failed: {e}"),
+                    }
+                }
             }
             PromptKind::Discard(path) => {
                 self.focus = Focus::Editor;
@@ -724,6 +905,7 @@ impl App {
             Focus::Search => self.search_key(key),
             Focus::Shell => {} // handled above
             Focus::Settings => self.settings_key(key),
+            Focus::Branches => self.branches_key(key),
         }
     }
 
@@ -760,6 +942,11 @@ impl App {
                     self.apply_theme(&names[next].clone());
                 }
             }
+            3 => self.settings.ai_enabled = !self.settings.ai_enabled,
+            4 => {
+                self.settings.vim_mode = !self.settings.vim_mode;
+                self.mode = if self.settings.vim_mode { Mode::Normal } else { Mode::Insert };
+            }
             _ => {}
         }
         self.settings.save();
@@ -774,6 +961,37 @@ impl App {
         }
     }
 
+    /// Run a WASM plugin extension and apply its effects.
+    fn run_wasm_extension(&mut self, e: &crate::extensions::Extension) {
+        let path = {
+            let p = std::path::Path::new(&e.wasm);
+            if p.is_absolute() { p.to_path_buf() } else { e.dir.join(&e.wasm) }
+        };
+        let (text, line, col) = self
+            .buffers
+            .get(self.active)
+            .map(|b| (b.text(), (b.row + 1) as i32, (b.col + 1) as i32))
+            .unwrap_or_default();
+        match crate::wasmext::run(&path, text, line, col) {
+            Ok(host) => {
+                for l in &host.logs {
+                    crate::logging::info(&format!("[ext {}] {l}", e.name));
+                }
+                if let Some(b) = self.buffers.get_mut(self.active) {
+                    for ins in &host.inserts {
+                        b.insert_str(ins);
+                    }
+                }
+                if let Some(s) = host.status {
+                    self.status = s;
+                } else {
+                    self.status = format!("Ran {}", e.name);
+                }
+            }
+            Err(err) => self.err(format!("Ext {} failed: {err}", e.name)),
+        }
+    }
+
     /// Run a command in a hidden background terminal; the result lands in the
     /// status bar. `label` is shown while it runs (e.g. "Pushing to origin").
     fn run_hidden(&mut self, label: &str, cmd: &str) {
@@ -783,8 +1001,26 @@ impl App {
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
         let script = format!("{cmd} 2>&1");
         let label = label.to_string();
+        // Expose editor context to the command (used by extensions).
+        let file = self.buffers.get(self.active).and_then(|b| b.path.clone());
+        let env_file = file.map(|p| p.display().to_string()).unwrap_or_default();
+        let (env_line, env_col) = self
+            .buffers
+            .get(self.active)
+            .map(|b| (b.row + 1, b.col + 1))
+            .unwrap_or((1, 1));
+        let env_root = cwd.display().to_string();
         std::thread::spawn(move || {
-            let msg = match Command::new(shell).arg("-c").arg(&script).current_dir(&cwd).output() {
+            let msg = match Command::new(shell)
+                .arg("-c")
+                .arg(&script)
+                .current_dir(&cwd)
+                .env("RUSTY_FILE", &env_file)
+                .env("RUSTY_LINE", env_line.to_string())
+                .env("RUSTY_COL", env_col.to_string())
+                .env("RUSTY_ROOT", &env_root)
+                .output()
+            {
                 Ok(o) => {
                     let text = String::from_utf8_lossy(&o.stdout);
                     let last = text.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("").trim().to_string();
@@ -805,6 +1041,65 @@ impl App {
         self.status = s;
     }
 
+    /// Set the status to an error message and record it in the log file.
+    fn err(&mut self, msg: String) {
+        crate::logging::error(&msg);
+        self.status = msg;
+    }
+
+    /// Ask the local model in a background thread; the answer shows in the AI panel.
+    fn ai_ask(&mut self, prompt: &str) {
+        if !self.settings.ai_enabled {
+            self.status = "Enable Local AI first (palette → AI: Enable)".to_string();
+            return;
+        }
+        self.ai_open = true;
+        self.ai_output.clear();
+        let (tx, rx) = channel();
+        let endpoint = self.settings.ai_endpoint.clone();
+        let model = self.settings.ai_model.clone();
+        let key = self.settings.ai_api_key.clone();
+        let prompt = prompt.to_string();
+        std::thread::spawn(move || {
+            let tx2 = tx.clone();
+            let result = crate::ai::generate_stream(&endpoint, &model, &key, &prompt, move |chunk| {
+                let _ = tx2.send(chunk.to_string());
+            });
+            if let Err(e) = result {
+                crate::logging::error(&format!("AI request failed: {e}"));
+                let _ = tx.send(format!(
+                    "AI error: {e}\n\nCheck the endpoint/model/token, or start a local server (ollama serve)."
+                ));
+            }
+        });
+        self.ai_rx = Some(rx);
+    }
+
+    /// Append streamed AI chunks into the panel. Returns true if it changed.
+    pub fn ai_poll(&mut self) -> bool {
+        let mut changed = false;
+        let mut disconnected = false;
+        if let Some(rx) = &self.ai_rx {
+            loop {
+                match rx.try_recv() {
+                    Ok(chunk) => {
+                        self.ai_output.push_str(&chunk);
+                        changed = true;
+                    }
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => {
+                        disconnected = true;
+                        break;
+                    }
+                }
+            }
+        }
+        if disconnected {
+            self.ai_rx = None;
+        }
+        changed
+    }
+
     /// Per-tick housekeeping: collect finished jobs and expire stale status.
     /// Returns true if a redraw is warranted.
     pub fn tick(&mut self) -> bool {
@@ -812,7 +1107,10 @@ impl App {
         let mut i = 0;
         while i < self.jobs.len() {
             match self.jobs[i].try_recv() {
-                Ok((_ok, msg)) => {
+                Ok((ok, msg)) => {
+                    if !ok {
+                        crate::logging::error(&msg);
+                    }
                     self.status = msg;
                     self.jobs.remove(i);
                     dirty = true;
@@ -835,6 +1133,27 @@ impl App {
             self.last_status.clear();
             dirty = true;
         }
+
+        // Periodically rescan the workspace so files added/removed outside the
+        // editor appear. Only redraw when the tree actually changed.
+        if self.tree.root.is_dir() && self.last_tree_scan.elapsed() >= Duration::from_millis(1500) {
+            self.last_tree_scan = Instant::now();
+            let before: Vec<PathBuf> = self.tree.entries.iter().map(|e| e.path.clone()).collect();
+            let sel_path = self.tree.visible().get(self.tree.selected).map(|e| e.path.clone());
+            self.tree.reload();
+            let after: Vec<PathBuf> = self.tree.entries.iter().map(|e| e.path.clone()).collect();
+            if before != after {
+                if let Some(p) = sel_path {
+                    if let Some(i) = self.tree.visible_index(&p) {
+                        self.tree.selected = i;
+                    }
+                }
+                let vis = self.tree.visible().len().max(1);
+                self.tree.selected = self.tree.selected.min(vis - 1);
+                self.refresh_git_status();
+                dirty = true;
+            }
+        }
         dirty
     }
 
@@ -846,7 +1165,7 @@ impl App {
                 match Terminal::spawn(self.tree.root.clone(), 24, 80) {
                     Ok(t) => self.term = Some(t),
                     Err(e) => {
-                        self.status = format!("Could not start terminal: {e}");
+                        self.err(format!("Could not start terminal: {e}"));
                         self.term_open = false;
                         self.focus = Focus::Editor;
                     }
@@ -1057,7 +1376,98 @@ impl App {
         }
     }
 
+    fn buf_do(&mut self, f: impl FnOnce(&mut Buffer)) {
+        if let Some(b) = self.buffers.get_mut(self.active) {
+            f(b);
+        }
+    }
+
+    /// Vim Normal-mode keys: motions, operators, and mode changes.
+    fn normal_key(&mut self, key: KeyEvent) {
+        use KeyCode::*;
+        // Operator-pending (dd, yy, gg).
+        if let Some(op) = self.vim_pending.take() {
+            match (op, key.code) {
+                ('d', Char('d')) => {
+                    if let Some(b) = self.buffers.get_mut(self.active) {
+                        let t = b.delete_line();
+                        self.set_clip(t);
+                    }
+                }
+                ('y', Char('y')) => {
+                    if let Some(t) = self.buffers.get(self.active).map(|b| format!("{}\n", b.lines[b.row])) {
+                        self.set_clip(t);
+                    }
+                }
+                ('g', Char('g')) => self.buf_do(|b| b.goto_top()),
+                _ => {}
+            }
+            return;
+        }
+        let h = self.editor_height;
+        match key.code {
+            Char('h') | Left => self.buf_do(|b| b.left()),
+            Char('l') | Right => self.buf_do(|b| b.right()),
+            Char('j') | Down => self.buf_do(|b| b.down()),
+            Char('k') | Up => self.buf_do(|b| b.up()),
+            Char('0') | Home => self.buf_do(|b| b.home()),
+            Char('$') | End => self.buf_do(|b| b.end()),
+            Char('^') => self.buf_do(|b| b.first_non_blank()),
+            Char('w') => self.buf_do(|b| b.next_word()),
+            Char('b') => self.buf_do(|b| b.prev_word()),
+            Char('G') => self.buf_do(|b| b.goto_bottom()),
+            PageUp => self.buf_do(|b| b.page(-1, h)),
+            PageDown => self.buf_do(|b| b.page(1, h)),
+            Char('x') | Delete => self.buf_do(|b| b.delete()),
+            Char('D') => self.buf_do(|b| b.delete_to_eol()),
+            Char('u') => self.buf_do(|b| b.undo()),
+            Char('p') => {
+                let t = self.get_clip();
+                self.buf_do(|b| b.insert_str(&t));
+            }
+            Char('i') => self.mode = Mode::Insert,
+            Char('a') => {
+                self.buf_do(|b| b.right());
+                self.mode = Mode::Insert;
+            }
+            Char('A') => {
+                self.buf_do(|b| b.end());
+                self.mode = Mode::Insert;
+            }
+            Char('I') => {
+                self.buf_do(|b| b.first_non_blank());
+                self.mode = Mode::Insert;
+            }
+            Char('o') => {
+                self.buf_do(|b| b.open_below());
+                self.mode = Mode::Insert;
+            }
+            Char('O') => {
+                self.buf_do(|b| b.open_above());
+                self.mode = Mode::Insert;
+            }
+            Char('d') => self.vim_pending = Some('d'),
+            Char('y') => self.vim_pending = Some('y'),
+            Char('g') => self.vim_pending = Some('g'),
+            Char(':') => {
+                self.focus = Focus::Palette;
+                self.palette_query.clear();
+                self.palette_sel = 0;
+            }
+            Char('/') => {
+                self.focus = Focus::Find;
+                self.find_query.clear();
+            }
+            _ => {}
+        }
+    }
+
     fn editor_key(&mut self, key: KeyEvent) {
+        // Vim Normal mode: motions/commands only.
+        if self.settings.vim_mode && self.mode == Mode::Normal {
+            self.normal_key(key);
+            return;
+        }
         // Completion popup intercepts navigation/accept keys.
         if let Some(c) = &mut self.completion {
             match key.code {
@@ -1081,7 +1491,9 @@ impl App {
             }
         }
         if key.code == KeyCode::Esc {
-            if self.show_tree {
+            if self.settings.vim_mode {
+                self.mode = Mode::Normal;
+            } else if self.show_tree {
                 self.focus = Focus::Tree;
             }
             return;
@@ -1268,15 +1680,17 @@ impl App {
     }
 
     pub fn palette_items(&self) -> Vec<(String, Action)> {
-        let cmds: [(&str, &str, Action); 18] = [
+        let cmds: [(&str, &str, Action); 24] = [
             ("Save File", "save", Action::Save),
             ("New File", "new file create", Action::NewFile),
             ("Close Buffer", "close", Action::Close),
             ("Toggle File Tree", "tree files", Action::ToggleTree),
             ("Go to Definition", "go to definition lsp symbol", Action::GotoDef),
             ("Hover (type info)", "hover type info lsp", Action::Hover),
+            ("Editor: Toggle Vim Mode", "editor toggle vim mode modal motions", Action::ToggleVim),
             ("Preferences: Settings", "settings preferences config", Action::Settings),
             ("Rusty: Update (reinstall latest)", "update upgrade", Action::Update),
+            ("Rusty: Open Log", "open log file errors debug", Action::OpenLog),
             ("Git: Initialize Repository", "git initialize repository init create", Action::GitInit),
             ("Git: Add Remote…", "git add remote origin url", Action::AddRemotePrompt),
             ("Git: Stage Current File", "git stage current file add", Action::StageFile),
@@ -1286,6 +1700,10 @@ impl App {
             ("Git: Push", "git push upload origin", Action::Push),
             ("Git: Pull", "git pull update origin", Action::Pull),
             ("Git: Fetch", "git fetch origin", Action::Fetch),
+            ("Git: Switch / Create Branch…", "git switch checkout create branch", Action::SwitchBranch),
+            ("Git: Rename Branch…", "git rename branch name", Action::RenameBranchPrompt),
+            ("Git: Delete Branch…", "git delete branch remove", Action::DeleteBranchPrompt),
+            ("Git: Publish Branch (push -u)", "git publish push upstream branch", Action::PublishBranch),
             ("Quit", "quit exit", Action::Quit),
         ];
         let q = self.palette_query.trim();
@@ -1295,6 +1713,32 @@ impl App {
                 scored.push((s, format!("> {label}"), action));
             }
         }
+
+        // Dynamic commands: go-to-line, extensions, and AI.
+        let mut extra: Vec<(String, String, Action)> = vec![(
+            "Go to Line…".into(),
+            "go to line number jump".into(),
+            Action::GotoLinePrompt,
+        )];
+        for (i, e) in self.extensions.iter().enumerate() {
+            extra.push((format!("Ext: {}", e.name), format!("ext extension {}", e.name), Action::RunExtension(i)));
+        }
+        if self.settings.ai_enabled {
+            extra.push(("AI: Ask…".into(), "ai ask question local model".into(), Action::AiAskPrompt));
+            extra.push(("AI: Explain Selection".into(), "ai explain selection code".into(), Action::AiExplain));
+            extra.push(("AI: Set Model…".into(), "ai set model".into(), Action::AiSetModelPrompt));
+            extra.push(("AI: Set Endpoint…".into(), "ai set endpoint url provider".into(), Action::AiSetEndpointPrompt));
+            extra.push(("AI: Set API Token (BYOT)…".into(), "ai set api token key byot cloud".into(), Action::AiSetTokenPrompt));
+            extra.push(("AI: Toggle Panel".into(), "ai panel toggle show".into(), Action::AiToggle));
+        } else {
+            extra.push(("AI: Enable Local AI (opt-in)".into(), "ai enable local turn on".into(), Action::AiEnable));
+        }
+        for (label, key, action) in extra {
+            if let Some(s) = fuzzy(q, &key) {
+                scored.push((s, format!("> {label}"), action));
+            }
+        }
+
         for (name, path) in self.tree.files() {
             if let Some(s) = fuzzy(q, name) {
                 scored.push((s, name.to_string(), Action::Open(path.to_path_buf())));
@@ -1367,6 +1811,89 @@ impl App {
             }
             Action::GotoDef => self.trigger_definition(),
             Action::Hover => self.trigger_hover(),
+            Action::GotoLinePrompt => {
+                self.prompt = Some(Prompt {
+                    label: "Go to line:".to_string(),
+                    input: String::new(),
+                    kind: PromptKind::GotoLine,
+                });
+                self.focus = Focus::Prompt;
+            }
+            Action::RunExtension(i) => {
+                if let Some(e) = self.extensions.get(i).cloned() {
+                    if !e.wasm.is_empty() {
+                        self.run_wasm_extension(&e);
+                    } else if e.terminal {
+                        if !self.term_open || self.term.is_none() {
+                            self.toggle_shell();
+                        }
+                        self.term_open = true;
+                        self.focus = Focus::Shell;
+                        if let Some(t) = &mut self.term {
+                            t.send_str(&format!("{}\n", e.command));
+                        }
+                    } else {
+                        self.run_hidden(&format!("Ext: {}", e.name), &e.command);
+                    }
+                }
+            }
+            Action::AiEnable => {
+                self.settings.ai_enabled = true;
+                self.settings.save();
+                self.status = "AI enabled — checking connection…".to_string();
+                // Probe the endpoint in the background.
+                let (tx, rx) = channel();
+                let endpoint = self.settings.ai_endpoint.clone();
+                let key = self.settings.ai_api_key.clone();
+                std::thread::spawn(move || {
+                    let ok = crate::ai::available(&endpoint, &key);
+                    let msg = if ok {
+                        format!("AI connected: {endpoint}")
+                    } else {
+                        format!("AI enabled, but {endpoint} is unreachable (start a server or set endpoint/token)")
+                    };
+                    let _ = tx.send((ok, msg));
+                });
+                self.jobs.push(rx);
+            }
+            Action::AiToggle => self.ai_open = !self.ai_open,
+            Action::AiAskPrompt => {
+                self.prompt = Some(Prompt {
+                    label: "Ask the local model:".to_string(),
+                    input: String::new(),
+                    kind: PromptKind::AiAsk,
+                });
+                self.focus = Focus::Prompt;
+            }
+            Action::AiSetModelPrompt => {
+                self.prompt = Some(Prompt {
+                    label: format!("Model name (current: {}):", self.settings.ai_model),
+                    input: String::new(),
+                    kind: PromptKind::AiModel,
+                });
+                self.focus = Focus::Prompt;
+            }
+            Action::AiSetEndpointPrompt => {
+                self.prompt = Some(Prompt {
+                    label: format!("API endpoint (current: {}):", self.settings.ai_endpoint),
+                    input: String::new(),
+                    kind: PromptKind::AiEndpoint,
+                });
+                self.focus = Focus::Prompt;
+            }
+            Action::AiSetTokenPrompt => {
+                self.prompt = Some(Prompt {
+                    label: "API token (stored in config; leave blank to clear):".to_string(),
+                    input: String::new(),
+                    kind: PromptKind::AiToken,
+                });
+                self.focus = Focus::Prompt;
+            }
+            Action::AiExplain => {
+                let sel = self.buffers.get(self.active).and_then(|b| b.selected_text());
+                let code = sel.or_else(|| self.buffers.get(self.active).map(|b| b.text())).unwrap_or_default();
+                self.ai_ask(&format!("Explain this code concisely:\n\n{code}"));
+            }
             Action::Settings => {
                 self.focus = Focus::Settings;
                 self.settings_sel = 0;
@@ -1375,9 +1902,43 @@ impl App {
             Action::Push => self.run_hidden("Pushing to origin", "git push -u origin HEAD"),
             Action::Pull => self.run_hidden("Pulling", "git pull"),
             Action::Fetch => self.run_hidden("Fetching", "git fetch --all"),
+            Action::PublishBranch => self.run_hidden("Publishing branch", "git push -u origin HEAD"),
+            Action::SwitchBranch => {
+                self.branch_list = git::branches(&self.tree.root);
+                self.branch_query.clear();
+                self.branch_sel = 0;
+                self.focus = Focus::Branches;
+            }
+            Action::RenameBranchPrompt => {
+                self.prompt = Some(Prompt {
+                    label: "Rename current branch to:".to_string(),
+                    input: String::new(),
+                    kind: PromptKind::RenameBranch,
+                });
+                self.focus = Focus::Prompt;
+            }
+            Action::DeleteBranchPrompt => {
+                self.prompt = Some(Prompt {
+                    label: "Delete branch named:".to_string(),
+                    input: String::new(),
+                    kind: PromptKind::DeleteBranch,
+                });
+                self.focus = Focus::Prompt;
+            }
             Action::Update => {
                 self.run_hidden("Updating Rusty", &format!("cargo install --git {REPO_URL} --force"))
             }
+            Action::ToggleVim => {
+                self.settings.vim_mode = !self.settings.vim_mode;
+                self.settings.save();
+                self.mode = if self.settings.vim_mode { Mode::Normal } else { Mode::Insert };
+                self.status = format!("Vim mode {}", if self.settings.vim_mode { "on" } else { "off" });
+            }
+            Action::OpenLog => match crate::logging::path() {
+                Some(p) if p.exists() => self.open_path(&p),
+                Some(p) => self.status = format!("No log yet at {}", p.display()),
+                None => self.status = "No log path available".to_string(),
+            },
             Action::Quit => self.quit = true,
         }
     }

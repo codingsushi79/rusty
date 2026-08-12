@@ -8,7 +8,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
 use ratatui::Frame;
 
-use crate::app::{App, Focus};
+use crate::app::{App, Focus, Mode};
 
 const BG: Color = Color::Rgb(30, 30, 30);
 const SIDEBAR: Color = Color::Rgb(37, 37, 38);
@@ -73,6 +73,11 @@ pub fn render(f: &mut Frame, app: &mut App) {
         let split = Layout::vertical([Constraint::Min(3), Constraint::Length(h)]).split(editor_area);
         render_editor(f, app, split[0]);
         render_terminal(f, app, split[1]);
+    } else if app.ai_open {
+        let h = (editor_area.height / 2).clamp(6, 18);
+        let split = Layout::vertical([Constraint::Min(3), Constraint::Length(h)]).split(editor_area);
+        render_editor(f, app, split[0]);
+        render_ai(f, app, split[1]);
     } else {
         render_editor(f, app, editor_area);
     }
@@ -85,10 +90,53 @@ pub fn render(f: &mut Frame, app: &mut App) {
         render_search(f, app, size);
     } else if app.focus == Focus::Settings {
         render_settings(f, app, size);
+    } else if app.focus == Focus::Branches {
+        render_branches(f, app, size);
     }
     if app.completion.is_some() && app.focus == Focus::Editor {
         render_completion(f, app);
     }
+}
+
+fn render_branches(f: &mut Frame, app: &App, size: Rect) {
+    let w = (size.width / 2).clamp(40, 70);
+    let h = (size.height / 2).clamp(8, 20);
+    let area = centered(w, h, size);
+    f.render_widget(Clear, area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(ACCENT))
+        .title(" Switch Branch  (Enter: checkout · type a new name + Enter to create · Esc) ")
+        .style(Style::default().bg(SIDEBAR));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let rows = Layout::vertical([Constraint::Length(1), Constraint::Length(1), Constraint::Min(1)]).split(inner);
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("switch to: ", Style::default().fg(ACCENT)),
+            Span::styled(format!("{}_", app.branch_query), Style::default().fg(WHITE)),
+        ])),
+        rows[0],
+    );
+    f.render_widget(Block::default().style(Style::default().bg(BORDER)), rows[1]);
+
+    let filtered = app.branches_filtered();
+    let current = app.branch_list.first().cloned().unwrap_or_default();
+    let items: Vec<ListItem> = filtered
+        .iter()
+        .map(|b| {
+            let marker = if *b == current { "● " } else { "  " };
+            let color = if *b == current { GIT_ADD } else { TEXT };
+            ListItem::new(Line::from(Span::styled(format!("{marker}{b}"), Style::default().fg(color))))
+        })
+        .collect();
+    let mut st = ListState::default();
+    if !items.is_empty() {
+        st.select(Some(app.branch_sel.min(items.len() - 1)));
+    }
+    let list = List::new(items).highlight_style(Style::default().bg(SELECT).fg(WHITE));
+    f.render_stateful_widget(list, rows[2], &mut st);
 }
 
 fn render_settings(f: &mut Frame, app: &App, size: Rect) {
@@ -108,6 +156,8 @@ fn render_settings(f: &mut Frame, app: &App, size: Rect) {
         ("Tab Size", app.settings.tab_size.to_string()),
         ("Line Numbers", if app.settings.line_numbers { "On".into() } else { "Off".into() }),
         ("Syntax Theme", app.hl.theme_name().to_string()),
+        ("Local AI (opt-in)", if app.settings.ai_enabled { "On".into() } else { "Off".into() }),
+        ("Vim Mode", if app.settings.vim_mode { "On".into() } else { "Off".into() }),
     ];
     let items: Vec<ListItem> = rows
         .iter()
@@ -395,12 +445,20 @@ fn render_status(f: &mut Frame, app: &App, area: Rect) {
         }
     }
     let diag = if errs + warns > 0 { format!("✖ {errs}  ⚠ {warns}   ") } else { String::new() };
+    let vim = if app.settings.vim_mode {
+        match app.mode {
+            Mode::Normal => " NORMAL ",
+            Mode::Insert => " INSERT ",
+        }
+    } else {
+        ""
+    };
     let (left, right) = match app.buf() {
         Some(buf) => (
-            format!(" ⎇ {}   {}{}", branch, buf.name(), if buf.modified { " ●" } else { "" }),
+            format!("{vim} ⎇ {}   {}{}", branch, buf.name(), if buf.modified { " ●" } else { "" }),
             format!("{}Ln {}, Col {}   {}   UTF-8 ", diag, buf.row + 1, buf.col + 1, buf.language()),
         ),
-        None => (format!(" ⎇ {}   —", branch), String::new()),
+        None => (format!("{vim} ⎇ {}   —", branch), String::new()),
     };
     let s = Style::default().fg(WHITE).bg(ACCENT);
     f.render_widget(Paragraph::new(left).style(s).alignment(Alignment::Left), area);
@@ -493,6 +551,25 @@ fn render_palette(f: &mut Frame, app: &App, size: Rect) {
     }
     let list = List::new(items).highlight_style(Style::default().bg(SELECT).fg(WHITE));
     f.render_stateful_widget(list, rows[2], &mut st);
+}
+
+fn render_ai(f: &mut Frame, app: &App, area: Rect) {
+    let block = Block::default()
+        .borders(Borders::TOP)
+        .border_style(Style::default().fg(BORDER))
+        .title(Span::styled(
+            format!(" LOCAL AI — {} ", app.settings.ai_model),
+            Style::default().fg(WHITE).add_modifier(Modifier::BOLD),
+        ))
+        .style(Style::default().bg(Color::Rgb(24, 24, 26)));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    f.render_widget(
+        Paragraph::new(app.ai_output.clone())
+            .style(Style::default().fg(TEXT))
+            .wrap(ratatui::widgets::Wrap { trim: false }),
+        inner,
+    );
 }
 
 fn render_terminal(f: &mut Frame, app: &mut App, area: Rect) {

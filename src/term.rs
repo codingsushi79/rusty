@@ -94,6 +94,11 @@ impl Terminal {
         let _ = self.writer.flush();
     }
 
+    /// Send a string (e.g. a command to run) to the shell.
+    pub fn send_str(&mut self, s: &str) {
+        self.write(s.as_bytes());
+    }
+
     /// Encode a key event to terminal bytes and send it to the shell.
     pub fn key(&mut self, key: KeyEvent) {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);

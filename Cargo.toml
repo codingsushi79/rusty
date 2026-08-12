@@ -32,6 +32,8 @@ serde = { version = "1.0.229", features = ["derive"] }
 toml = "1.1.4"
 portable-pty = "0.8"
 vt100 = "0.15"
+ureq = "2"
+wasmi = "0.31"
 
 [profile.release]
 opt-level = 3

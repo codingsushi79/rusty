@@ -521,6 +521,142 @@ impl Buffer {
         self.desired = self.col;
     }
 
+    // --- Vim-style motions & line ops --------------------------------------
+
+    fn line_vec(&self, row: usize) -> Vec<char> {
+        self.lines.get(row).map(|l| l.chars().collect()).unwrap_or_default()
+    }
+
+    pub fn first_non_blank(&mut self) {
+        self.break_run();
+        let line = self.line_vec(self.row);
+        self.col = line.iter().position(|c| !c.is_whitespace()).unwrap_or(0);
+        self.desired = self.col;
+    }
+
+    pub fn next_word(&mut self) {
+        self.break_run();
+        let is_word = |c: char| c.is_alphanumeric() || c == '_';
+        let n = self.lines.len();
+        loop {
+            let line = self.line_vec(self.row);
+            if self.col >= line.len() {
+                if self.row + 1 < n {
+                    self.row += 1;
+                    self.col = 0;
+                    let l2 = self.line_vec(self.row);
+                    if l2.is_empty() || !l2[0].is_whitespace() {
+                        break;
+                    }
+                    continue;
+                }
+                break;
+            }
+            let cur = line[self.col];
+            if cur.is_whitespace() {
+                while self.col < line.len() && line[self.col].is_whitespace() {
+                    self.col += 1;
+                }
+            } else {
+                let word = is_word(cur);
+                while self.col < line.len() && !line[self.col].is_whitespace() && is_word(line[self.col]) == word {
+                    self.col += 1;
+                }
+                while self.col < line.len() && line[self.col].is_whitespace() {
+                    self.col += 1;
+                }
+            }
+            if self.col < line.len() {
+                break;
+            }
+        }
+        self.desired = self.col;
+    }
+
+    pub fn prev_word(&mut self) {
+        self.break_run();
+        let is_word = |c: char| c.is_alphanumeric() || c == '_';
+        loop {
+            if self.col == 0 {
+                if self.row > 0 {
+                    self.row -= 1;
+                    self.col = self.line_chars(self.row);
+                    continue;
+                }
+                break;
+            }
+            let line = self.line_vec(self.row);
+            while self.col > 0 && line[self.col - 1].is_whitespace() {
+                self.col -= 1;
+            }
+            if self.col == 0 {
+                continue;
+            }
+            let word = is_word(line[self.col - 1]);
+            while self.col > 0 && !line[self.col - 1].is_whitespace() && is_word(line[self.col - 1]) == word {
+                self.col -= 1;
+            }
+            break;
+        }
+        self.desired = self.col;
+    }
+
+    pub fn goto_top(&mut self) {
+        self.break_run();
+        self.row = 0;
+        self.col = 0;
+        self.desired = 0;
+    }
+
+    pub fn goto_bottom(&mut self) {
+        self.break_run();
+        self.row = self.lines.len().saturating_sub(1);
+        self.col = 0;
+        self.desired = 0;
+    }
+
+    /// Delete the current line and return its text (for the yank register).
+    pub fn delete_line(&mut self) -> String {
+        self.begin(Edit::Other);
+        self.anchor = None;
+        let text = self.lines[self.row].clone();
+        if self.lines.len() == 1 {
+            self.lines[0].clear();
+        } else {
+            self.lines.remove(self.row);
+            self.row = self.row.min(self.lines.len() - 1);
+        }
+        self.col = 0;
+        self.desired = 0;
+        self.touched();
+        format!("{text}\n")
+    }
+
+    /// Delete from the cursor to the end of the line (Vim `D`).
+    pub fn delete_to_eol(&mut self) {
+        self.begin(Edit::Other);
+        let b = Self::byte_of(&self.lines[self.row], self.col);
+        self.lines[self.row].truncate(b);
+        self.touched();
+    }
+
+    pub fn open_below(&mut self) {
+        self.begin(Edit::Other);
+        self.lines.insert(self.row + 1, String::new());
+        self.row += 1;
+        self.col = 0;
+        self.desired = 0;
+        self.touched();
+    }
+
+    pub fn open_above(&mut self) {
+        self.begin(Edit::Other);
+        self.lines.insert(self.row, String::new());
+        self.col = 0;
+        self.desired = 0;
+        self.touched();
+    }
+
     pub fn scroll_into_view(&mut self, height: usize, width: usize) {
         if self.row < self.top {
             self.top = self.row;

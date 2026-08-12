@@ -34,6 +34,60 @@ pub fn statuses(root: &Path) -> HashMap<PathBuf, char> {
     map
 }
 
+/// Local branch names (current branch first).
+pub fn branches(root: &Path) -> Vec<String> {
+    let Ok(repo) = git2::Repository::discover(root) else { return Vec::new() };
+    let current = repo.head().ok().and_then(|h| h.shorthand().map(String::from));
+    let mut names = Vec::new();
+    if let Ok(branches) = repo.branches(Some(git2::BranchType::Local)) {
+        for b in branches.flatten() {
+            if let Ok(Some(name)) = b.0.name() {
+                names.push(name.to_string());
+            }
+        }
+    }
+    names.sort();
+    if let Some(cur) = current {
+        names.retain(|n| n != &cur);
+        names.insert(0, cur);
+    }
+    names
+}
+
+/// Check out an existing local branch.
+pub fn checkout_branch(root: &Path, name: &str) -> anyhow::Result<()> {
+    let repo = git2::Repository::discover(root)?;
+    let obj = repo.revparse_single(name)?;
+    repo.checkout_tree(&obj, Some(git2::build::CheckoutBuilder::new().safe()))?;
+    repo.set_head(&format!("refs/heads/{name}"))?;
+    Ok(())
+}
+
+/// Create a new branch from HEAD and check it out.
+pub fn create_branch(root: &Path, name: &str) -> anyhow::Result<()> {
+    let repo = git2::Repository::discover(root)?;
+    let head = repo.head()?.peel_to_commit()?;
+    repo.branch(name, &head, false)?;
+    drop(head);
+    checkout_branch(root, name)
+}
+
+pub fn delete_branch(root: &Path, name: &str) -> anyhow::Result<()> {
+    let repo = git2::Repository::discover(root)?;
+    repo.find_branch(name, git2::BranchType::Local)?.delete()?;
+    Ok(())
+}
+
+/// Rename the current branch.
+pub fn rename_branch(root: &Path, new_name: &str) -> anyhow::Result<()> {
+    let repo = git2::Repository::discover(root)?;
+    let head = repo.head()?;
+    let current = head.shorthand().ok_or_else(|| anyhow::anyhow!("detached HEAD"))?.to_string();
+    let mut b = repo.find_branch(&current, git2::BranchType::Local)?;
+    b.rename(new_name, false)?;
+    Ok(())
+}
+
 /// Discard working-tree changes to `file` (restore it from HEAD).
 pub fn discard(file: &Path) -> anyhow::Result<()> {
     let repo = git2::Repository::discover(file)?;

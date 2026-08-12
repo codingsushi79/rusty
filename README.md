@@ -33,7 +33,17 @@ curl -fsSL https://raw.githubusercontent.com/codingsushi79/rusty/master/scripts/
 irm https://raw.githubusercontent.com/codingsushi79/rusty/master/scripts/install.ps1 | iex
 ```
 
+**Nix** (flake, Linux & macOS · x86-64 and ARM):
+
+```bash
+nix run github:codingsushi79/rusty            # run without installing
+nix profile install github:codingsushi79/rusty
+```
+
 Or run from source: `cargo run --release -- .`
+
+Rusty is cross-platform — macOS, Linux, Windows, and \*BSD — since it builds on
+`crossterm`/`ratatui`; `cargo install` works on all of them.
 
 ## Usage
 
@@ -87,17 +97,35 @@ rusty ./my-proj  # open a folder
   info (`Ctrl+K`) — also in the palette. Auto-starts a server for the file's
   language if one is on your `PATH`.
 - **Git** — a **diff gutter** (added / modified / removed markers vs HEAD),
-  **file-tree decorations** (`M`/`A`/`U`/`D` badges with colored names), plus
-  **init repo**, **add remote**, **stage file / stage all**, **discard changes**,
-  **commit**, and **push / pull / fetch** from the palette. Network commands run
-  **in the background** (no pane) using your existing git credentials, and report
-  the result in the status bar.
+  **file-tree decorations** (`M`/`A`/`U`/`D` badges with colored names),
+  **branch** switch / create / rename / delete / publish, plus **init repo**,
+  **add remote**, **stage file / stage all**, **discard changes**, **commit**,
+  and **push / pull / fetch** from the palette. Network commands run **in the
+  background** (no pane) using your existing git credentials, and report the
+  result in the status bar.
+- **Extensions** — drop a small TOML manifest in `~/.config/rusty/extensions/`
+  or `<project>/.rusty/extensions/` to add an `Ext: <name>` palette command that
+  runs a tool with `RUSTY_FILE` / `RUSTY_LINE` / `RUSTY_COL` / `RUSTY_ROOT` in
+  the environment (in the background or the terminal pane).
+- **Local AI (opt-in)** — off by default, no network unless you enable it.
+  **Ask** / **Explain Selection** against a **local** model (Ollama / llama.cpp)
+  *or* any OpenAI-compatible cloud provider by **bringing your own token**
+  (`AI: Set API Token`). Replies **stream** token-by-token into a bottom panel.
+- **Vim mode (opt-in)** — modal editing with Normal/Insert modes and motions:
+  `h j k l`, `w b`, `0 $ ^`, `gg G`, `x`, `dd`, `D`, `yy`, `p`, `u`,
+  `i a A I o O`, and `:` / `/` to jump to the palette / find. Toggle in Settings
+  (`Ctrl+,`) or `Editor: Toggle Vim Mode`; the mode shows in the status bar.
+- **Go to Line** (`Go to Line…` in the palette).
 - **Settings** (`Ctrl+,`) — tab size, line numbers, syntax theme; saved to
   `~/.config/rusty/config.toml` (or the platform equivalent).
 - **Self-update** — `Rusty: Update` in the palette reinstalls the latest build.
 - **Mouse** — click to place the cursor, open files, and switch tabs; drag to
   select; wheel to scroll.
-- **Status bar** — git branch, file, diagnostics, Ln/Col, language; **hint bar**.
+- **Status bar** — git branch, file, diagnostics, Ln/Col, language; **hint bar**
+  that auto-fades after a few seconds.
+- **Live file tree** — files added/removed outside the editor appear automatically.
+- **Logging** — errors and panics are written to a log file; open it with
+  `Rusty: Open Log` in the palette.
 
 ## Language servers
 
@@ -110,13 +138,48 @@ LSP auto-starts if the server binary is on your `PATH`:
 | TS/JS | `typescript-language-server` | `npm i -g typescript-language-server typescript` |
 | Go | `gopls` | `go install golang.org/x/tools/gopls@latest` |
 
+## Extensions
+
+Create `~/.config/rusty/extensions/<name>.toml` (or `<project>/.rusty/extensions/<name>.toml`):
+
+```toml
+name = "Format (rustfmt)"
+command = "rustfmt \"$RUSTY_FILE\""
+terminal = false   # true = run in the terminal pane instead of the background
+```
+
+It shows up as `Ext: Format (rustfmt)` in the command palette.
+
+### WASM plugins
+
+An extension can instead point at a sandboxed WebAssembly module:
+
+```toml
+name = "My Plugin"
+wasm = "plugin.wasm"   # path relative to the manifest
+```
+
+The plugin exports `run()` and may import host functions (module `rusty`) —
+`status`, `log`, `insert`, `line`, `col`, `file_len`, `file_read` — to read the
+current file and change the editor. Effects are applied after `run()` returns,
+so plugins never touch editor state directly (run via `wasmi`, no JIT).
+
+## AI
+
+Off by default. Enable via `AI: Enable Local AI` in the palette (or Settings).
+Works with a local server or any OpenAI-compatible API:
+
+- **Local:** run `ollama serve`; default endpoint `http://localhost:11434/v1`.
+- **Cloud (BYOT):** `AI: Set Endpoint…` (e.g. `https://api.openai.com/v1`) and
+  `AI: Set API Token…`, then `AI: Set Model…`.
+
 ## Roadmap
 
 | Feature | Notes |
 | --- | --- |
-| **LSP go-to-definition / hover** | jump to symbols, show types on demand |
-| **Extensions & local AI** | scripting hooks; opt-in local model, no telemetry |
-| **Config & themes** | `~/.config/rusty/config.toml`, selectable themes |
+| **Vim counts & registers** | `3j`, named registers, more operators |
+| **Richer WASM host API** | text ranges, selections, callbacks |
+| **Debugger (DAP)** | breakpoints, stepping |
 
 ## Architecture
 
@@ -132,6 +195,10 @@ src/
   git.rs         branch, HEAD blob (diff gutter), init, remote, stage, commit
   lsp.rs         JSON-RPC language-server client (diagnostics, completion)
   term.rs        interactive PTY terminal (vt100 emulator + key encoding)
+  ai.rs          opt-in AI client (OpenAI-compatible; local or BYOT)
+  extensions.rs  external-tool extensions (TOML manifests)
+  wasmext.rs     sandboxed WASM plugin host (wasmi)
+  logging.rs     file logging (errors/panics)
 ```
 
 ## License

@@ -2,15 +2,19 @@
 //!
 //! Usage: `rusty [path]` — opens a folder (or the current directory).
 
+mod ai;
 mod app;
 mod buffer;
 mod config;
+mod extensions;
 mod git;
 mod highlight;
+mod logging;
 mod lsp;
 mod term;
 mod tree;
 mod ui;
+mod wasmext;
 
 use std::io::stdout;
 use std::path::PathBuf;
@@ -35,10 +39,12 @@ fn main() -> anyhow::Result<()> {
     let mut app = App::new(&root)?;
 
     // Restore the terminal even if we panic.
+    logging::info(&format!("rusty starting: {}", root.display()));
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let _ = disable_raw_mode();
         let _ = execute!(stdout(), LeaveAlternateScreen, DisableMouseCapture);
+        logging::error(&format!("panic: {info}"));
         default_hook(info);
     }));
 
@@ -81,6 +87,9 @@ fn run<B: ratatui::backend::Backend>(
             dirty = true;
         }
         if app.term_poll() {
+            dirty = true;
+        }
+        if app.ai_poll() {
             dirty = true;
         }
         if app.tick() {

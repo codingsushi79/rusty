@@ -10,13 +10,30 @@ pub struct Settings {
     pub tab_size: usize,
     /// Show the line-number gutter.
     pub line_numbers: bool,
+    /// Enable Vim-style modal editing (Normal/Insert modes + motions).
+    pub vim_mode: bool,
     /// syntect theme name for syntax highlighting.
     pub syntax_theme: String,
+    /// Opt-in local AI. Off by default; no network unless enabled.
+    pub ai_enabled: bool,
+    pub ai_endpoint: String,
+    pub ai_model: String,
+    /// Bring-your-own-token for cloud providers (empty for local servers).
+    pub ai_api_key: String,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { tab_size: 4, line_numbers: true, syntax_theme: "base16-ocean.dark".to_string() }
+        Self {
+            tab_size: 4,
+            line_numbers: true,
+            vim_mode: false,
+            syntax_theme: "base16-ocean.dark".to_string(),
+            ai_enabled: false,
+            ai_endpoint: "http://localhost:11434/v1".to_string(),
+            ai_model: "llama3.2".to_string(),
+            ai_api_key: String::new(),
+        }
     }
 }
 
