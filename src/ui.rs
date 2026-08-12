@@ -140,31 +140,41 @@ fn render_branches(f: &mut Frame, app: &App, size: Rect) {
 }
 
 fn render_settings(f: &mut Frame, app: &App, size: Rect) {
-    let w = (size.width * 3 / 5).clamp(48, 80);
-    let h = 9;
+    let w = (size.width * 2 / 3).clamp(52, 92);
+    let h = 12;
     let area = centered(w, h, size);
     f.render_widget(Clear, area);
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(ACCENT))
-        .title(" Settings   (↑↓ select · ◂ ▸ change · Esc: save & close) ")
+        .title(" Settings   (↑↓ select · ◂ ▸ or Enter to change · Esc: save & close) ")
         .style(Style::default().bg(SIDEBAR));
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    let rows = [
-        ("Tab Size", app.settings.tab_size.to_string()),
-        ("Line Numbers", if app.settings.line_numbers { "On".into() } else { "Off".into() }),
-        ("Syntax Theme", app.hl.theme_name().to_string()),
-        ("Local AI (opt-in)", if app.settings.ai_enabled { "On".into() } else { "Off".into() }),
-        ("Vim Mode", if app.settings.vim_mode { "On".into() } else { "Off".into() }),
+    let on = |b: bool| if b { "On".to_string() } else { "Off".to_string() };
+    let rows: [(&str, String, bool); 8] = [
+        ("Tab Size", app.settings.tab_size.to_string(), false),
+        ("Line Numbers", on(app.settings.line_numbers), false),
+        ("Syntax Theme", app.hl.theme_name().to_string(), false),
+        ("Vim Mode", on(app.settings.vim_mode), false),
+        ("Local AI (opt-in)", on(app.settings.ai_enabled), false),
+        ("AI Endpoint", app.settings.ai_endpoint.clone(), true),
+        ("AI Model", app.settings.ai_model.clone(), true),
+        ("AI API Token", if app.settings.ai_api_key.is_empty() { "not set".into() } else { "set ✓".into() }, true),
     ];
     let items: Vec<ListItem> = rows
         .iter()
-        .map(|(label, value)| {
+        .map(|(label, value, edit)| {
+            // Text fields are edited with Enter; the rest cycle with ◂ ▸.
+            let value_span = if *edit {
+                Span::styled(format!("{value}  ⏎"), Style::default().fg(WHITE).add_modifier(Modifier::BOLD))
+            } else {
+                Span::styled(format!("◂ {value} ▸"), Style::default().fg(WHITE).add_modifier(Modifier::BOLD))
+            };
             ListItem::new(Line::from(vec![
-                Span::styled(format!("  {label:<16}"), Style::default().fg(TEXT)),
-                Span::styled(format!("◂ {value} ▸"), Style::default().fg(WHITE).add_modifier(Modifier::BOLD)),
+                Span::styled(format!("  {label:<18}"), Style::default().fg(TEXT)),
+                value_span,
             ]))
         })
         .collect();

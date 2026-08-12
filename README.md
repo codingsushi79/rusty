@@ -116,8 +116,9 @@ rusty ./my-proj  # open a folder
   `i a A I o O`, and `:` / `/` to jump to the palette / find. Toggle in Settings
   (`Ctrl+,`) or `Editor: Toggle Vim Mode`; the mode shows in the status bar.
 - **Go to Line** (`Go to Line…` in the palette).
-- **Settings** (`Ctrl+,`) — tab size, line numbers, syntax theme; saved to
-  `~/.config/rusty/config.toml` (or the platform equivalent).
+- **Settings** (`Ctrl+,`) — tab size, line numbers, syntax theme, **Vim mode**,
+  **Local AI** on/off, and the AI **endpoint / model / token** (edit inline with
+  Enter). Saved to `~/.config/rusty/config.toml` (or the platform equivalent).
 - **Self-update** — `Rusty: Update` in the palette reinstalls the latest build.
 - **Mouse** — click to place the cursor, open files, and switch tabs; drag to
   select; wheel to scroll.

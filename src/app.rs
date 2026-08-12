@@ -21,7 +21,7 @@ use crate::tree::{Entry, Tree};
 /// The GitHub repo this build installs/updates from.
 pub const REPO_URL: &str = "https://github.com/codingsushi79/rusty";
 /// Number of rows in the settings screen (for selection wrap).
-pub const SETTINGS_COUNT: usize = 5;
+pub const SETTINGS_COUNT: usize = 8;
 
 /// A diagnostic (error/warning) from the language server.
 pub struct Diagnostic {
@@ -942,14 +942,32 @@ impl App {
                     self.apply_theme(&names[next].clone());
                 }
             }
-            3 => self.settings.ai_enabled = !self.settings.ai_enabled,
-            4 => {
+            3 => {
                 self.settings.vim_mode = !self.settings.vim_mode;
                 self.mode = if self.settings.vim_mode { Mode::Normal } else { Mode::Insert };
             }
+            4 => self.settings.ai_enabled = !self.settings.ai_enabled,
+            // AI text fields: Enter/Right opens an edit prompt.
+            5 if dir > 0 => self.open_edit_prompt(
+                format!("API endpoint (current: {}):", self.settings.ai_endpoint),
+                PromptKind::AiEndpoint,
+            ),
+            6 if dir > 0 => self.open_edit_prompt(
+                format!("Model name (current: {}):", self.settings.ai_model),
+                PromptKind::AiModel,
+            ),
+            7 if dir > 0 => self.open_edit_prompt(
+                "API token (stored in config; blank clears):".to_string(),
+                PromptKind::AiToken,
+            ),
             _ => {}
         }
         self.settings.save();
+    }
+
+    fn open_edit_prompt(&mut self, label: String, kind: PromptKind) {
+        self.prompt = Some(Prompt { label, input: String::new(), kind });
+        self.focus = Focus::Prompt;
     }
 
     fn apply_theme(&mut self, name: &str) {
